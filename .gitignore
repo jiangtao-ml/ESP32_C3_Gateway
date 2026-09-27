@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------
+# Arduino / ESP32 build artifacts
+# ---------------------------------------------------------------
+build/
+*.bin
+*.elf
+*.map
+*.hex
+*.uf2
+.lock
+*.o
+*.d
+*.a
+*.su
+*.wall
+core.*
+sdkconfig
+sdkconfig.old
+sdkconfig.*
+managed_components/
+dependencies.lock
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+*.ninja
+.flash_args
+partitions.bin
+bootloader.bin
+firmware.bin
+esp-idf/
+build.ninja
+
+# ---------------------------------------------------------------
+# Logs and temporary files
+# ---------------------------------------------------------------
+*.log
+*.log.*
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp
+*.swo
+*~
+logs/
+03_logs/*
+!03_logs/.gitkeep
+
+# ---------------------------------------------------------------
+# IDE / editor configuration
+# ---------------------------------------------------------------
+.vscode/
+.idea/
+*.code-workspace
+.cproject
+.project
+.settings/
+*.sln
+*.vcxproj
+*.vcxproj.*
+.vs/
+platformio.ini.bak
+debug.cfg
+
+# ---------------------------------------------------------------
+# OS metadata
+# ---------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---------------------------------------------------------------
+# Local secrets / machine-specific
+# ---------------------------------------------------------------
+*.local
+.env
+secrets.h
+wifi_credentials.h
