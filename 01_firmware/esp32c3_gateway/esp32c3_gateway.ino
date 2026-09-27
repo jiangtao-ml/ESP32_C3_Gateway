@@ -2,19 +2,21 @@
  * esp32c3_gateway.ino
  * ESP32-C3 RS-485 采集网关（替换树莓派网关项目）
  *
- * 当前里程碑：M3 —— UART1 物理回环自测（GPIO21 短接 GPIO20）
+ * 当前里程碑：M4 —— 真实 485 总线收发 + Modbus RTU 解析
  *
  * 已实现：WiFi 连接与最小自恢复、SNTP 对时（含 UNSYNCED 降级）、每秒 1 包 UDP 心跳上行、
- *        UART1 9600 8N1 每秒一次物理回环自测（发 8 字节测试帧并逐字节比对）
- * 未实现：Modbus RTU 组帧 / 解析 / CRC（M4 起；本文件不含任何 Modbus 协议代码）
+ *        每秒一轮 Modbus RTU 请求/响应：帧长驱动接收 + 三级超时、地址/功能码匹配、
+ *        CRC16/Modbus 校验、数据域提取（M4 响应帧固定 9 字节 = 读 2 个保持寄存器）
+ * 未实现：QI 真机协议（功能码 0x04 读输入寄存器、39 寄存器分段读取）—— 留待 M5；
+ *        M4 只用 0x03 报文在「电脑端 Modbus 从站」上验证物理链路与解析正确性
  *
  * 硬约束：
  *   - 全程 millis() 非阻塞调度，禁止 delay()
  *   - WiFi 凭据只来自 secrets.h（不入库），本文件不出现任何凭据明文
  *   - 不引入第三方库（仅用 ESP32 core 自带的 WiFi / WiFiUdp / time / HardwareSerial）
  *   - ⚠️ USB CDC On Boot 必须 = Enabled：否则 Serial 会落到 UART0（GPIO20/21），
- *     与 UART1 回环测试争用同一对引脚
-
+ *     与 UART1 争用同一对引脚
+ *   - ⚠️ MAX13487 的 RXO 为 5V 时必须先 1kΩ/2kΩ 分压再进 GPIO20；EN 保持断开
  *
  * 事实来源：04_ai_prompts/00_context.md
  * 编译设置：Arduino IDE -> Tools -> USB CDC On Boot = Enabled
@@ -38,13 +40,14 @@
 // ---------------------------------------------------------------
 // 最小非阻塞状态机（M2 起在位；M6 只做加固，不重构）
 //   IDLE -> TX -> WAIT_RX -> PARSE -> SEND -> IDLE
-//   M3：TX / WAIT_RX / PARSE 已填充 UART1 物理回环自测；M4 把 PARSE 换成 Modbus RTU 解析
+//   M2 起：IDLE/SEND（UDP 心跳）；M3 起：TX/WAIT_RX/PARSE（UART1 收发）
+//   M4：TX 发 Modbus 请求帧；WAIT_RX 帧长驱动 + 三级超时；PARSE 做真实 Modbus RTU 解析
 // ---------------------------------------------------------------
 enum GatewayState : uint8_t {
   ST_IDLE = 0,   // 等待 1s 定时到点
-  ST_TX,         // 向 UART1 发送 8 字节测试帧
-  ST_WAIT_RX,    // 收回环字节：首字节 80ms / 字符间隔 4ms / 整帧 300ms 三级判超时
-  ST_PARSE,      // 比对 TX/RX 并打印结果（M4 改为 Modbus RTU 解析 + CRC）
+  ST_TX,         // 向 UART1 发送 Modbus 请求帧（写前清 RX -> write -> flush）
+  ST_WAIT_RX,    // 等响应：首字节 80ms / 字符间隔 4ms / 帧长驱动 / 整帧兜底 300ms
+  ST_PARSE,      // 帧长 + 地址 + 功能码 + CRC16/Modbus 校验，提取数据域
   ST_SEND        // UDP 上行（M2 心跳逻辑保留）
 };
 
@@ -63,18 +66,31 @@ static WiFiUDP g_udp;
 static char    g_payload[160];
 
 // ---------------------------------------------------------------
-// UART1 物理回环自测（M3）：发什么就应该一模一样收回来
+// RS-485 收发缓冲（M4）
+//   TX：Modbus 请求帧，固定 MODBUS_TEST_FRAME_LEN 字节
+//   RX：响应帧。两个尺寸不同（发 8 收 9），必须是两个独立的缓冲，不能共用。
 // ---------------------------------------------------------------
-static const uint8_t RS485_TEST_FRAME[]   = {0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xC4, 0x0B};
-static const uint8_t RS485_TEST_FRAME_LEN = sizeof(RS485_TEST_FRAME);   // = 8
+static const uint8_t MODBUS_TEST_FRAME_BYTES[] = MODBUS_TEST_FRAME;
+static const uint8_t MODBUS_TX_LEN             = MODBUS_TEST_FRAME_LEN;
 
-static uint8_t  g_txFrame[RS485_TEST_FRAME_LEN];
-static uint8_t  g_rxFrame[RS485_TEST_FRAME_LEN];
+// 帧长驱动的目标长度：总线模式 = 响应帧长；回环模式 = 请求帧长（发 8 收 8）
+#if RS485_MODE_LOOPBACK_SELFTEST
+static const uint8_t g_expectRxLen = MODBUS_TX_LEN;
+#else
+static const uint8_t g_expectRxLen = MODBUS_EXPECT_RESP_LEN;
+#endif
+
+static_assert(sizeof(MODBUS_TEST_FRAME_BYTES) == (size_t)MODBUS_TEST_FRAME_LEN,
+              "MODBUS_TEST_FRAME_LEN 与 MODBUS_TEST_FRAME 字节数不一致");
+
+static uint8_t  g_txFrame[MODBUS_TX_LEN];
+static uint8_t  g_rxFrame[MODBUS_RX_BUF_MAX];
 static uint8_t  g_rxLen         = 0;
+static bool     g_rxOverflow    = false;  // true = 收到超过缓冲上限的字节（只标记，不写缓冲）
 static uint32_t g_tRxStartMs    = 0;      // 三级超时的共同基准（已含 TX_GUARD 保护间隔）
 static uint32_t g_tRxLastByteMs = 0;      // 最后一个字节到达时刻（字符间隔判据）
-static bool     g_rxIncomplete  = false;  // true = 本次未收满帧（超时）
-static uint32_t g_loopOk = 0, g_loopFail = 0, g_loopTimeout = 0;
+static bool     g_rxIncomplete  = false;  // true = 本次未收满预期帧长（超时 / 半帧）
+static uint32_t g_statOk = 0, g_statFail = 0, g_statTimeout = 0;
 
 // ---------------------------------------------------------------
 // 小工具
@@ -100,7 +116,7 @@ static bool buildTimestamp(char *out, size_t outSize) {
   return false;
 }
 
-// 把字节数组格式化成 "01 03 00 00 00 02 C4 0B"（回环日志与差异定位用）
+// 把字节数组格式化成 "01 03 00 00 00 02 C4 0B"（日志与差异定位用）
 static void bytesToHex(const uint8_t *buf, uint8_t len, char *out, size_t outSize) {
   size_t pos = 0;
   out[0] = '\0';
@@ -111,6 +127,26 @@ static void bytesToHex(const uint8_t *buf, uint8_t len, char *out, size_t outSiz
     pos += (size_t)n;
   }
 }
+
+#if !RS485_MODE_LOOPBACK_SELFTEST
+// ---------------------------------------------------------------
+// CRC16/Modbus —— 初值 0xFFFF、多项式 0xA001、逐位计算
+// 本函数与 06_QI协议说明.md 第 1 节 CRC 定义一致：
+//   帧内 CRC 以【低字节在前】的字节序附加/校验（与 STB3-125 协议文档一致）。
+// 已独立复算：01 03 00 00 00 02 -> 0x0BC4 -> 帧尾 C4 0B。
+// ---------------------------------------------------------------
+static uint16_t modbusCRC16(const uint8_t *data, size_t len) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= (uint16_t)data[i];
+    for (uint8_t bit = 0; bit < 8; bit++) {
+      if (crc & 0x0001U) crc = (uint16_t)((crc >> 1) ^ 0xA001U);
+      else               crc = (uint16_t)(crc >> 1);
+    }
+  }
+  return crc;
+}
+#endif  // !RS485_MODE_LOOPBACK_SELFTEST
 
 // ---------------------------------------------------------------
 // WiFi：非阻塞检查 + 节流重连（绝不用 delay()）
@@ -195,6 +231,140 @@ static void sendUdpPayload() {
   Serial.printf("[UDP -> %s:%u] %s\n", UDP_TARGET_IP, (unsigned)UDP_TARGET_PORT, g_payload);
 }
 
+#if !RS485_MODE_LOOPBACK_SELFTEST
+// 把当前 RX 帧按十六进制打到下一行（异常帧定位用；最长打 24 字节，避免刷屏）
+static void logRxHex() {
+  uint8_t n = (g_rxLen > 24) ? 24 : g_rxLen;
+  char buf[3 * 24 + 8];
+  bytesToHex(g_rxFrame, n, buf, sizeof(buf));
+  Serial.printf("      RX=%u | %s%s\n", (unsigned)g_rxLen, buf, (g_rxLen > n) ? " ..." : "");
+}
+
+// ---------------- M4：真实 485 总线 —— Modbus RTU 响应解析 ----------------
+// 顺序：超时/半帧 -> 帧长 -> 地址 -> 功能码 -> 完整帧 CRC -> 数据域
+// 注：M4 固定 9 字节（0x03 读 2 寄存器）；M5 起按 byte count 动态算帧长。
+static void parseResponse() {
+  // (1) 超时 / 半帧：三级超时或字符间隔先触发
+  if (g_rxIncomplete) {
+    g_statTimeout++;
+    Serial.printf("[M4] 超时（首字节 %ums / 字符间隔 %ums / 兜底 %ums）RX=%u 期望 %u\n",
+                  (unsigned)RS485_FIRST_BYTE_TIMEOUT_MS, (unsigned)RS485_CHAR_TIMEOUT_MS,
+                  (unsigned)RS485_FRAME_MAX_MS, (unsigned)g_rxLen, (unsigned)g_expectRxLen);
+    if (g_rxLen) logRxHex();
+    return;
+  }
+
+  // (2) 帧长异常：M4 期望固定 9 字节
+  if (g_rxLen != g_expectRxLen) {
+    g_statFail++;
+    Serial.printf("[M4] 帧长异常 期望 %u 收到 %u\n",
+                  (unsigned)g_expectRxLen, (unsigned)g_rxLen);
+    logRxHex();
+    // 常见误因：MAX13487 的 RE#/EN 被常开使能 -> 自己的请求被回读（RX 帧 == TX 帧，8 字节）
+    if (g_rxLen == MODBUS_TX_LEN && memcmp(g_rxFrame, g_txFrame, MODBUS_TX_LEN) == 0) {
+      Serial.println("      [诊断] RX 帧 == TX 帧：疑似自发自收回显（查 MAX13487 的 EN/RE# 接线，EN 应断开）");
+    }
+    return;
+  }
+
+  const uint8_t addr = g_rxFrame[0];
+  const uint8_t func = g_rxFrame[1];
+  // 帧尾 2 字节为 CRC，低字节在前：recv = rx[n-2] | (rx[n-1] << 8)
+  const uint16_t crcRecv = (uint16_t)g_rxFrame[g_rxLen - 2] |
+                           ((uint16_t)g_rxFrame[g_rxLen - 1] << 8);
+  const uint16_t crcCalc = modbusCRC16(g_rxFrame, (size_t)(g_rxLen - 2));
+
+  // (3) 地址匹配（收到 >= 2 字节即可判）
+  if (addr != RS485_SLAVE_ADDR) {
+    g_statFail++;
+    Serial.printf("[M4] 地址不匹配 期望 %u 收到 %u\n",
+                  (unsigned)RS485_SLAVE_ADDR, (unsigned)addr);
+    logRxHex();
+    return;
+  }
+
+  // (4) 功能码匹配：最高位置 1 = 从站异常响应，次字节为异常码
+  if (func & 0x80) {
+    g_statFail++;
+    Serial.printf("[M4] 从站异常响应 FUNC=0x%02X 异常码=0x%02X\n",
+                  (unsigned)func, (unsigned)g_rxFrame[2]);
+    logRxHex();
+    return;
+  }
+  if (func != MODBUS_FUNC_READ_HOLDING && func != MODBUS_FUNC_READ_INPUT) {
+    g_statFail++;
+    Serial.printf("[M4] 功能码不匹配 期望 0x%02X/0x%02X 收到 0x%02X\n",
+                  (unsigned)MODBUS_FUNC_READ_HOLDING, (unsigned)MODBUS_FUNC_READ_INPUT,
+                  (unsigned)func);
+    logRxHex();
+    return;
+  }
+
+  // (5) 完整帧 CRC16/Modbus 校验
+  if (crcCalc != crcRecv) {
+    g_statFail++;
+    Serial.printf("[M4] CRC 失败 期望 %04X 计算 %04X\n",
+                  (unsigned)crcRecv, (unsigned)crcCalc);
+    logRxHex();
+    return;
+  }
+
+  // (6) 数据域：byte count 必须与帧长自洽（1 + 1 + 1 + N + 2）
+  const uint8_t byteCount = g_rxFrame[2];
+  if ((uint16_t)(byteCount + 5) != (uint16_t)g_rxLen) {
+    g_statFail++;
+    Serial.printf("[M4] 帧长异常 期望 %u 收到 %u（byte count=%u）\n",
+                  (unsigned)(byteCount + 5), (unsigned)g_rxLen, (unsigned)byteCount);
+    logRxHex();
+    return;
+  }
+
+  g_statOk++;
+  char dataHex[3 * MODBUS_RX_BUF_MAX + 1];
+  bytesToHex(g_rxFrame + 3, byteCount, dataHex, sizeof(dataHex));
+  Serial.printf("[M4] 解析 OK ADDR=%u FUNC=0x%02X DATA=%s\n",
+                (unsigned)addr, (unsigned)func, dataHex);
+  if ((byteCount % 2) == 0 && byteCount > 0) {           // 顺带打印 16 位寄存器值，便于与从站设置对照
+    Serial.print("      REG:");
+    for (uint8_t i = 0; i + 1 < byteCount; i += 2) {
+      uint16_t v = ((uint16_t)g_rxFrame[3 + i] << 8) | (uint16_t)g_rxFrame[4 + i];
+      Serial.printf(" [%u]=%u", (unsigned)(i / 2), (unsigned)v);
+    }
+    Serial.printf("  CRC=%04X\n", (unsigned)crcRecv);
+  }
+}
+#else
+// ---------------- M3 式物理回环自测（RS485_MODE_LOOPBACK_SELFTEST = 1） ----------------
+// 发什么就应该一模一样收回来（GPIO21 短接 GPIO20，且不接 MAX13487）
+static void parseResponse() {
+  char txHex[3 * MODBUS_TX_LEN + 1];
+  bytesToHex(g_txFrame, MODBUS_TX_LEN, txHex, sizeof(txHex));
+
+  if (g_rxIncomplete) {
+    g_statTimeout++;
+    Serial.printf("[485] 回环 TIMEOUT（首字节 %ums / 字符间隔 %ums / 兜底 %ums）RX=%u\n",
+                  (unsigned)RS485_FIRST_BYTE_TIMEOUT_MS, (unsigned)RS485_CHAR_TIMEOUT_MS,
+                  (unsigned)RS485_FRAME_MAX_MS, (unsigned)g_rxLen);
+  } else if (g_rxLen == MODBUS_TX_LEN && memcmp(g_txFrame, g_rxFrame, MODBUS_TX_LEN) == 0) {
+    g_statOk++;
+    Serial.printf("[485] 回环 OK TX=%u RX=%u | %s\n",
+                  (unsigned)MODBUS_TX_LEN, (unsigned)g_rxLen, txHex);
+  } else {
+    char rxHex[3 * MODBUS_RX_BUF_MAX + 1];
+    bytesToHex(g_rxFrame, g_rxLen, rxHex, sizeof(rxHex));
+    g_statFail++;
+    Serial.printf("[485] 回环 FAIL TX=%u RX=%u | 期望 %s 收到 %s\n",
+                  (unsigned)MODBUS_TX_LEN, (unsigned)g_rxLen, txHex, rxHex);
+    for (uint8_t i = 0; i < g_rxLen && i < MODBUS_TX_LEN; i++) {   // 差异字节逐一定位
+      if (g_rxFrame[i] != g_txFrame[i]) {
+        Serial.printf("      [差异] byte[%u] 期望 %02X 收到 %02X\n",
+                      (unsigned)i, (unsigned)g_txFrame[i], (unsigned)g_rxFrame[i]);
+      }
+    }
+  }
+}
+#endif
+
 static void stateTick() {
   switch (g_state) {
     case ST_IDLE:
@@ -204,17 +374,18 @@ static void stateTick() {
     case ST_TX: {
       // ⚠️ 清 RX 缓冲必须在 write() 【之前】：
       // 物理回环下"发"与"收"是同时进行的，字节在 flush 返回前就已进 RX 缓冲；
-      // 若照搬到 flush() 之后再清，会把刚收回来的回环字节一并丢掉 → 必然误报 TIMEOUT。
-      // 这里清的是上一周期残留（半帧 / 噪声）。
+      // 若照搬到 flush() 之后再清，会把刚收回来的字节一并丢掉 → 必然误报 TIMEOUT。
+      // 真实总线上清的是上一周期残留（半帧 / 噪声 / 上一次的迟到响应）。
       while (Serial1.available()) (void)Serial1.read();
 
-      memcpy(g_txFrame, RS485_TEST_FRAME, RS485_TEST_FRAME_LEN);
-      Serial1.write(g_txFrame, RS485_TEST_FRAME_LEN);
+      memcpy(g_txFrame, MODBUS_TEST_FRAME_BYTES, MODBUS_TX_LEN);
+      Serial1.write(g_txFrame, MODBUS_TX_LEN);
       Serial1.flush();                                     // 等 8 字节全部移出（9600 下约 8.3ms，有界阻塞）
 
       g_rxLen         = 0;
+      g_rxOverflow    = false;
       g_rxIncomplete  = false;
-      g_tRxStartMs    = millis() + RS485_TX_GUARD_MS;      // 保护间隔：到点前不收
+      g_tRxStartMs    = millis() + RS485_TX_GUARD_MS;      // 保护间隔：等收发器方向切回接收后再收
       g_tRxLastByteMs = g_tRxStartMs;
       g_state         = ST_WAIT_RX;
       break;
@@ -226,12 +397,16 @@ static void stateTick() {
 
       while (Serial1.available()) {                        // 收字节（read() 已设 timeout=0，不阻塞）
         uint8_t b = (uint8_t)Serial1.read();
-        if (g_rxLen < RS485_TEST_FRAME_LEN) g_rxFrame[g_rxLen++] = b;
-        // 超出预期长度的字节直接丢弃，避免缓冲把状态机卡在 WAIT_RX
+        if (g_rxLen < MODBUS_RX_BUF_MAX) g_rxFrame[g_rxLen++] = b;
+        else                             g_rxOverflow = true;   // 超长帧：只标记，不再写缓冲
         g_tRxLastByteMs = millis();
       }
 
-      if (g_rxLen >= RS485_TEST_FRAME_LEN) {               // 收满 8 字节，提前结束等待
+      if (g_rxLen >= g_expectRxLen) {                      // 帧长驱动：收满预期帧长即止
+        g_state = ST_PARSE;
+        break;
+      }
+      if (g_rxOverflow) {                                  // 已超过缓冲上限，不必再等
         g_state = ST_PARSE;
         break;
       }
@@ -246,7 +421,7 @@ static void stateTick() {
         if (frameEl >= RS485_FIRST_BYTE_TIMEOUT_MS) {
           g_rxIncomplete = true; g_state = ST_PARSE; break;
         }
-      } else {                                             // 二级：字节间静默 → 判本帧已结束（半帧）
+      } else {                                             // 二级：字节间静默 → 判本帧结束（半帧）
         if ((now - g_tRxLastByteMs) >= RS485_CHAR_TIMEOUT_MS) {
           g_rxIncomplete = true; g_state = ST_PARSE; break;
         }
@@ -254,42 +429,18 @@ static void stateTick() {
       break;
     }
 
-    case ST_PARSE: {
-      char txHex[3 * RS485_TEST_FRAME_LEN + 1];
-      bytesToHex(g_txFrame, RS485_TEST_FRAME_LEN, txHex, sizeof(txHex));
-
-      if (g_rxIncomplete) {
-        g_loopTimeout++;
-        Serial.printf("[485] 回环 TIMEOUT（首字节 %ums / 字符间隔 %ums / 兜底 %ums）RX=%u\n",
-                      (unsigned)RS485_FIRST_BYTE_TIMEOUT_MS, (unsigned)RS485_CHAR_TIMEOUT_MS,
-                      (unsigned)RS485_FRAME_MAX_MS, (unsigned)g_rxLen);
-      } else if (memcmp(g_txFrame, g_rxFrame, RS485_TEST_FRAME_LEN) == 0) {
-        g_loopOk++;
-        Serial.printf("[485] 回环 OK TX=%u RX=%u | %s\n",
-                      (unsigned)RS485_TEST_FRAME_LEN, (unsigned)g_rxLen, txHex);
-      } else {
-        char rxHex[3 * RS485_TEST_FRAME_LEN + 1];
-        bytesToHex(g_rxFrame, g_rxLen, rxHex, sizeof(rxHex));
-        g_loopFail++;
-        Serial.printf("[485] 回环 FAIL TX=%u RX=%u | 期望 %s 收到 %s\n",
-                      (unsigned)RS485_TEST_FRAME_LEN, (unsigned)g_rxLen, txHex, rxHex);
-        for (uint8_t i = 0; i < g_rxLen; i++) {            // 差异字节逐一定位
-          if (i >= RS485_TEST_FRAME_LEN || g_rxFrame[i] != g_txFrame[i]) {
-            Serial.printf("      [差异] byte[%u] 期望 %02X 收到 %02X\n",
-                          (unsigned)i, (unsigned)g_txFrame[i], (unsigned)g_rxFrame[i]);
-          }
+    case ST_PARSE:
+      parseResponse();                                     // 回环模式=逐字节比对；总线模式=Modbus RTU 解析
+      {
+        uint32_t total = g_statOk + g_statFail + g_statTimeout;
+        if (total > 0 && (total % RS485_STATS_EVERY_N) == 0) {   // 每 100 次打印一次累计
+          Serial.printf("[485] 统计：成功 %lu / 失败 %lu / 超时 %lu\n",
+                        (unsigned long)g_statOk, (unsigned long)g_statFail,
+                        (unsigned long)g_statTimeout);
         }
-      }
-
-      uint32_t total = g_loopOk + g_loopFail + g_loopTimeout;
-      if (total > 0 && (total % RS485_STATS_EVERY_N) == 0) {   // 每 100 次打印一次累计
-        Serial.printf("[485] 统计：成功 %lu / 失败 %lu / 超时 %lu\n",
-                      (unsigned long)g_loopOk, (unsigned long)g_loopFail,
-                      (unsigned long)g_loopTimeout);
       }
       g_state = ST_SEND;
       break;
-    }
 
     case ST_SEND:
       sendUdpPayload();
@@ -334,10 +485,23 @@ void setup() {
   Serial1.setTimeout(0);                   // read() 绝不阻塞；超时判定全部交给 millis()
   Serial.printf("[485] UART1 就绪 baud=%lu 8N1 RX=GPIO%d TX=GPIO%d\n",
                 (unsigned long)RS485_BAUD, (unsigned)RS485_RX_PIN, (unsigned)RS485_TX_PIN);
-  Serial.println("[485] 物理回环自测：请用杜邦线短接 GPIO21 <-> GPIO20（M3 不接 MAX13487）");
+
+#if RS485_MODE_LOOPBACK_SELFTEST
+  Serial.println("[485] 模式=M3 物理回环自测：请短接 GPIO21 <-> GPIO20，且不接 MAX13487");
+#else
+  Serial.println("[485] 模式=真实 485 总线：ESP32(TX) -> MAX13487 -> 电脑 USB 转 485（Modbus 从站）");
+  Serial.println("[485] ⚠️ RXO 必须 1k/2k 分压后接 GPIO20；EN 保持断开；三方必须共地");
+#endif
+  {
+    char txHex[3 * MODBUS_TX_LEN + 1];
+    bytesToHex(MODBUS_TEST_FRAME_BYTES, MODBUS_TX_LEN, txHex, sizeof(txHex));
+    Serial.printf("[485] 请求 %u 字节 | %s  ->  期望响应 %u 字节（从站地址 %u，功能码 0x%02X 读 2 个保持寄存器）\n",
+                  (unsigned)MODBUS_TX_LEN, txHex, (unsigned)g_expectRxLen,
+                  (unsigned)RS485_SLAVE_ADDR, (unsigned)MODBUS_FUNC_READ_HOLDING);
+  }
 
   g_nextPollMs = millis() + POLL_INTERVAL_MS;
-  Serial.println("[BOOT] M3 就绪：WiFi + NTP + UDP 心跳 + UART1 物理回环自测");
+  Serial.println("[BOOT] M4 就绪：WiFi + NTP + UDP 心跳 + 485 总线收发 + Modbus RTU 解析");
 }
 
 void loop() {

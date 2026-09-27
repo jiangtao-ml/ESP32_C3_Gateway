@@ -42,17 +42,45 @@
 #define WIFI_RECONNECT_INTERVAL_MS 5000  // 断开后重连节流：≥5s 一次
 
 // ---------------------------------------------------------------
-// RS-485 / UART1 —— M3 物理回环自测已启用（Modbus 协议解析留待 M4）
+// RS-485 / UART1 —— M4：真实 485 总线收发 + Modbus RTU 解析已启用
 //
 // 超时三级设计（全部由 millis() 驱动，无 delay()）：
 //   一级 首字节超时 -> 二级 字符间隔超时（判本帧结束）-> 三级 整帧兜底
+// 另加【帧长驱动】：收满预期帧长立即结束等待，不等第二级/第三级超时。
 // 9600 8N1 下 1 字节 ≈ 1.04ms、8 字节 ≈ 8.3ms，故下列阈值余量充足。
 // ---------------------------------------------------------------
 #define RS485_BAUD                  9600   // 已确认为最终值（9600，8N1，无校验，设备地址 1）
 #define RS485_RX_PIN                20     // UART1 RX = GPIO20（经分压后接入）
 #define RS485_TX_PIN                21     // UART1 TX = GPIO21
-#define RS485_TX_GUARD_MS           2      // 发送完成后的保护间隔：等总线稳定后再开始收
+#define RS485_TX_GUARD_MS           2      // 发送完成后的保护间隔：等 MAX13487 方向切回接收后再收
+                                           // ⚠️ M4 真实总线上若稳定丢首字节，先把它调到 3~5ms 复测
 #define RS485_FIRST_BYTE_TIMEOUT_MS 80     // 一级：等首个字节的时限
 #define RS485_CHAR_TIMEOUT_MS       4      // 二级：字节间静默即判本帧结束（≈4 个字符时间）
 #define RS485_FRAME_MAX_MS          300    // 三级：整帧兜底，防死等
 #define RS485_STATS_EVERY_N         100    // 每 N 次回环打印一次累计统计
+
+// ---------------------------------------------------------------
+// M4：真实 485 总线 + Modbus RTU 解析
+// 事实来源：04_ai_prompts/00_context.md、05_hardware/STB3-125_Errata.md
+// ---------------------------------------------------------------
+#define RS485_SLAVE_ADDR            1      // 从站地址（QI 设备地址 1；M4 用电脑模拟从站，同为 1）
+#define MODBUS_FUNC_READ_HOLDING    0x03   // 读保持寄存器（M4 链路自测用）
+#define MODBUS_FUNC_READ_INPUT      0x04   // 读输入寄存器（QI 真机用，M5 起）
+
+// M4 请求帧：向从站 1 读 2 个保持寄存器（起始 0x0000）
+// CRC16/Modbus = 0x0BC4 -> 低字节在前 = C4 0B（已独立复算，与 00_context.md 第四节 4.1 一致）
+#define MODBUS_TEST_FRAME  {0x01, 0x03, 0x00, 0x00, 0x00, 0x02, 0xC4, 0x0B}
+#define MODBUS_TEST_FRAME_LEN        8      // 地址1 + 功能1 + 起始2 + 数量2 + CRC2
+
+// 期望响应帧长：地址1 + 功能1 + 字节数1 + 数据4 + CRC2 = 9
+#define MODBUS_EXPECT_RESP_LEN       9
+
+// RX 缓冲上限：M4 只用前 9 字节；M5 读全部参数（0x27=39 个寄存器）响应为 83 字节
+// （1+1+1+78+2），此处一次预留到位，M5 无需改缓冲尺寸。
+#define MODBUS_RX_BUF_MAX            96
+
+// 接收模式开关：
+//   0 = 真实 485 总线（默认）：接 MAX13487 + 电脑 USB 转 485 从站，发 8 字节 / 期望收 9 字节
+//   1 = M3 式物理回环自测：GPIO21 短接 GPIO20 且不接 MAX13487，发 8 字节 / 期望收回同一 8 字节
+//       用于在 M5 接真机前快速回归"串口层"是否正常（改 1 烧录自测，测完务必改回 0）。
+#define RS485_MODE_LOOPBACK_SELFTEST 0
