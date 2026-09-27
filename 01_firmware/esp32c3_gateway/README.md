@@ -88,11 +88,11 @@ Serial1.begin(9600, SERIAL_8N1, 20, 21);   // RX=GPIO20, TX=GPIO21，9600 8N1
 ```text
 [WIFI] 静态配置 IP=192.168.1.200 GW=192.168.1.1 MASK=255.255.255.0 DNS=192.168.1.1
 [WIFI] 已发起连接（非阻塞），等待 wifiTick() 报告结果
-[NTP] SNTP 已启动 TZ=<CST-8> 主=ntp.aliyun.com 备=203.107.6.88
 [UDP] 本地端口 12345，目标 192.168.1.117:8888
 [BOOT] M2 骨架就绪：WiFi + NTP + UDP + 非阻塞状态机
 [WIFI] 已连接 SSID=xxx RSSI=-55 dBm IP=192.168.1.200 GW=192.168.1.1
-[NTP] 时间已同步：本地 2026-09-27 20:15:03（TZ=<CST-8>，源 ntp.aliyun.com / 备选 203.107.6.88）
+[NTP] WiFi 已连上 -> 触发 SNTP 对时 TZ=CST-8 主=ntp.aliyun.com 备=203.107.6.88
+[NTP] 时间已同步：本地 2026-09-27 20:15:03 +0800（TZ=CST-8，源 ntp.aliyun.com / 备选 203.107.6.88）
 [UDP -> 192.168.1.117:8888] BOOT+5.012 | UNSYNCED
 [UDP -> 192.168.1.117:8888] 2026-09-27 20:15:01 | M2_HEARTBEAT
 ```
@@ -100,8 +100,9 @@ Serial1.begin(9600, SERIAL_8N1, 20, 21);   // RX=GPIO20, TX=GPIO21，9600 8N1
 4. **判定标准**（对应任务书 §9.1 M2）：
    - NetAssist 接收区**每秒出现 1 行**，格式 `YYYY-MM-DD HH:MM:SS | M2_HEARTBEAT`；
    - 对时完成前为 `BOOT+<秒>.<毫秒> | UNSYNCED`，对时完成后自动切换为墙钟时间；
+   - **时区自检**：串口 `[NTP] 时间已同步` 行末尾应为 `+0800`（东八区）。若显示 `+0000`，说明 `NTP_TZ_INFO` 未生效（见 config.h 中关于不可写 `"<CST-8>"` 的注释）；
    - 连续 ≥60s 不断包（**从第 2 个包开始计时**，规避 ARP 首包丢失）。
-5. **断网自恢复验证**：断开路由器 2.4GHz 约 30s 再恢复 → 串口应出现 `[WIFI] 连接断开` → `[WIFI] 第 N 次重连` → `[WIFI] 已连接` → `[NTP] 重新触发 SNTP 对时`，且 **≤60s 内恢复发包**。
+5. **断网自恢复验证**：断开路由器 2.4GHz 约 30s 再恢复 → 串口应出现 `[WIFI] 连接断开` → `[WIFI] 第 N 次重连` → `[WIFI] 已连接` → `[NTP] WiFi 已连上 -> 触发 SNTP 对时`，且 **≤60s 内恢复发包**。
 
 > 排查提示：NetAssist 收不到包 → 先看串口有无 `[WIFI] 已连接`（未连上则看 SSID 是否 2.4GHz）；再看 NetAssist 端口是否 8888 且已「打开」；最后确认电脑 IPv4 未变。
 

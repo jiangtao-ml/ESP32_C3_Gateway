@@ -98,7 +98,7 @@ static void wifiTick() {
       Serial.printf("[WIFI] 已连接 SSID=%s RSSI=%d dBm IP=%s GW=%s\n",
                     WiFi.SSID().c_str(), (int)WiFi.RSSI(),
                     WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str());
-      g_ntpResyncPending = true;           // 重连后立即重新触发 SNTP（时间可能已漂移）
+      g_ntpResyncPending = true;           // 首次连上 / 重连成功 -> 连上之后才触发 SNTP 对时
     }
     return;
   }
@@ -126,8 +126,10 @@ static void wifiTick() {
 static void ntpTick() {
   if (g_ntpResyncPending) {
     g_ntpResyncPending = false;
+    // ⚠️ 必须在 WiFi 连上之后调用：网络未就绪时 SNTP 初始化会失败，表现为永不对时
     configTzTime(NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
-    Serial.println("[NTP] 重新触发 SNTP 对时");
+    Serial.printf("[NTP] WiFi 已连上 -> 触发 SNTP 对时 TZ=%s 主=%s 备=%s\n",
+                  NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
   }
 
   if ((uint32_t)(millis() - g_lastNtpCheckMs) < 200) return;   // 节流，避免每轮都取时钟
@@ -140,7 +142,7 @@ static void ntpTick() {
   g_timeSynced = synced;
   if (synced) {
     char ts[32];
-    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", &now);
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S %z", &now);  // %z 用于自检：应为 +0800，若为 +0000 即 TZ 未生效
     Serial.printf("[NTP] 时间已同步：本地 %s（TZ=%s，源 %s / 备选 %s）\n",
                   ts, NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
   } else {
@@ -212,9 +214,10 @@ void setup() {
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);    // 非阻塞：连接进度由 wifiTick() 观察
   Serial.println("[WIFI] 已发起连接（非阻塞），等待 wifiTick() 报告结果");
 
-  // ---- NTP：主域名 + 备选 IP 直连 ----
-  configTzTime(NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
-  Serial.printf("[NTP] SNTP 已启动 TZ=%s 主=%s 备=%s\n", NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
+  // ---- NTP：此处【不】调用 configTzTime ----
+  // 根因修复：SNTP 依赖已就绪的网络栈。若在 WiFi 连上之前初始化，SNTP 拿不到网络；
+  // 现改为由 wifiTick() 在"首次连上 / 重连成功"时置位 g_ntpResyncPending，
+  // 再由 ntpTick() 调用 configTzTime（主域名 + 备选 IP 直连）。
 
   // ---- UDP：本地端口打开，目标由 config.h 指定 ----
   g_udp.begin(UDP_LOCAL_PORT);
