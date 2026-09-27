@@ -47,7 +47,7 @@
   - Arduino IDE 2.3.10 已安装（Windows）。
   - 工程目录结构已规划（01_firmware, 02_docs, 03_logs, 04_ai_prompts, 05_hardware, 06_tests）。
   - 任务书已进入 M0 冻结评审（迭代记录见 02_docs/01_项目任务书.md 第 13 节变更记录）。技术审查报告与 v0.2 复查报告均已完成。QI Modbus 协议已获取并入库。COM号待查询。
-  - 电脑实际 IPv4 地址已知：192.168.1.117（但电脑连的是5GHz频段，需注意ESP32仅支持2.4GHz）。
+  - 电脑网络实测见本节末『网络环境与裁定』小节（WLAN 192.168.1.117 / 网段 192.168.1.0/24 / 频段与客户端隔离待 M1 实测）。
   - ESP32开发板包在下载过程中卡在 esp-x32@2601，未安装成功。
 - 待确认盲区：
   - QI 设备真实 Modbus 协议已获取（STB3-125）。原始文档见 05_hardware/STB3-125_Modbus_Protocol.doc，字段映射见 05_hardware/STB3-125_Database_Fields.docx，提炼版见 02_docs/06_QI协议说明.md。通信参数：设备地址 1、9600、8N1、无校验、CRC16 低位在前。
