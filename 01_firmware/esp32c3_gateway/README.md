@@ -1,14 +1,14 @@
 # 01_firmware/esp32c3_gateway —— ESP32-C3 RS-485 采集网关固件主工程
 
 本目录是「ESP32-C3 替换树莓派网关项目」的固件主工程（Arduino IDE sketch）。
-当前处于 **阶段二 · M1 环境搭建**：只放最小空壳，尚未写任何 WiFi / NTP / RS-485 / Modbus 业务代码。
+当前处于 **阶段二 · M2（WiFi + NTP + UDP）**：已实现联网、SNTP 对时、每秒 1 包 UDP 心跳与最小非阻塞状态机骨架；**尚未写任何 RS-485 / Modbus 代码**（M3 起）。
 
 ## 目录结构
 
 ```
 01_firmware/esp32c3_gateway/
-├── esp32c3_gateway.ino     # sketch 主文件（空壳：setup 仅初始化 USB CDC，loop 空转）
-├── config.h               # 非敏感常量（全部为占位符，M1 实测后填写）
+├── esp32c3_gateway.ino     # sketch 主文件（M2：WiFi + NTP + UDP + 最小非阻塞状态机）
+├── config.h               # 非敏感常量（电脑/自身 IP、端口、NTP、周期；已落实为实值）
 ├── secrets.h.example      # 凭据模板（占位符，不含真实值）
 ├── secrets.h              # ← 本地自建，不入库（.gitignore 已忽略）
 └── README.md              # 本文件
@@ -41,7 +41,7 @@ sketch 目录名必须与 .ino 文件名一致（`esp32c3_gateway`），否则 A
 
 关键设置：**USB CDC On Boot = Enabled**（此项是 `Serial` 有输出的前提）。
 
-UART1 参数（代码中按此调用，本阶段尚未接入）：
+UART1 参数（**M3 才接入**，当前代码中未调用）：
 
 ```cpp
 Serial1.begin(9600, SERIAL_8N1, 20, 21);   // RX=GPIO20, TX=GPIO21，9600 8N1
@@ -77,8 +77,37 @@ Serial1.begin(9600, SERIAL_8N1, 20, 21);   // RX=GPIO20, TX=GPIO21，9600 8N1
 
 > ⚠️ 回环自检必须**先断开 MAX13487**，避免总线偏置/终端电阻干扰判断。
 
+## M2：WiFi + NTP + UDP 联通验证
+
+前提：本目录已有 `secrets.h`（含真实 SSID / 密码）；`config.h` 的 `UDP_TARGET_IP` / `LOCAL_IP` 与实测一致。
+
+1. **电脑侧**：打开 **NetAssist（网络调试助手）**，协议选 **UDP**，本地端口填 **8888**（= `UDP_TARGET_PORT`），点「打开」。
+2. 确认电脑无线网卡 IPv4 仍为 `192.168.1.117`（`ipconfig /all`）；若已变化，先改 `config.h` 再烧录。
+3. 烧录固件并打开串口监视器（115200）。预期串口输出：
+
+```text
+[WIFI] 静态配置 IP=192.168.1.200 GW=192.168.1.1 MASK=255.255.255.0 DNS=192.168.1.1
+[WIFI] 已发起连接（非阻塞），等待 wifiTick() 报告结果
+[NTP] SNTP 已启动 TZ=<CST-8> 主=ntp.aliyun.com 备=203.107.6.88
+[UDP] 本地端口 12345，目标 192.168.1.117:8888
+[BOOT] M2 骨架就绪：WiFi + NTP + UDP + 非阻塞状态机
+[WIFI] 已连接 SSID=xxx RSSI=-55 dBm IP=192.168.1.200 GW=192.168.1.1
+[NTP] 时间已同步：本地 2026-09-27 20:15:03（TZ=<CST-8>，源 ntp.aliyun.com / 备选 203.107.6.88）
+[UDP -> 192.168.1.117:8888] BOOT+5.012 | UNSYNCED
+[UDP -> 192.168.1.117:8888] 2026-09-27 20:15:01 | M2_HEARTBEAT
+```
+
+4. **判定标准**（对应任务书 §9.1 M2）：
+   - NetAssist 接收区**每秒出现 1 行**，格式 `YYYY-MM-DD HH:MM:SS | M2_HEARTBEAT`；
+   - 对时完成前为 `BOOT+<秒>.<毫秒> | UNSYNCED`，对时完成后自动切换为墙钟时间；
+   - 连续 ≥60s 不断包（**从第 2 个包开始计时**，规避 ARP 首包丢失）。
+5. **断网自恢复验证**：断开路由器 2.4GHz 约 30s 再恢复 → 串口应出现 `[WIFI] 连接断开` → `[WIFI] 第 N 次重连` → `[WIFI] 已连接` → `[NTP] 重新触发 SNTP 对时`，且 **≤60s 内恢复发包**。
+
+> 排查提示：NetAssist 收不到包 → 先看串口有无 `[WIFI] 已连接`（未连上则看 SSID 是否 2.4GHz）；再看 NetAssist 端口是否 8888 且已「打开」；最后确认电脑 IPv4 未变。
+
 ## 约束
 
-- 本阶段不写 WiFi / NTP / RS-485 / Modbus 业务代码，不引入任何第三方库。
+- RS-485 / Modbus 业务代码尚未编写（M3 起）；不引入任何第三方库（只用 ESP32 core 自带 WiFi / WiFiUdp / time）。
+- 全程 `millis()` 非阻塞调度，**禁止 `delay()`**。
 - `secrets.h` 永不入库；`config.h` 只放非敏感常量。
 - 事实来源：`04_ai_prompts/00_context.md`（动手前必读）。
