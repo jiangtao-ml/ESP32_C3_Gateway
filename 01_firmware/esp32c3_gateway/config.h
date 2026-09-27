@@ -42,10 +42,17 @@
 #define WIFI_RECONNECT_INTERVAL_MS 5000  // 断开后重连节流：≥5s 一次
 
 // ---------------------------------------------------------------
-// RS-485 / Modbus —— M3 起使用，M2 未引用（此处仅登记常量，无 485 代码）
+// RS-485 / UART1 —— M3 物理回环自测已启用（Modbus 协议解析留待 M4）
+//
+// 超时三级设计（全部由 millis() 驱动，无 delay()）：
+//   一级 首字节超时 -> 二级 字符间隔超时（判本帧结束）-> 三级 整帧兜底
+// 9600 8N1 下 1 字节 ≈ 1.04ms、8 字节 ≈ 8.3ms，故下列阈值余量充足。
 // ---------------------------------------------------------------
-#define RS485_BAUD           9600   // 已确认为最终值（9600，8N1，无校验，设备地址 1）
-#define RS485_RX_PIN         20     // UART1 RX = GPIO20（经分压后接入）
-#define RS485_TX_PIN         21     // UART1 TX = GPIO21
-#define RS485_TIMEOUT_MS     300    // 首字节后按帧长动态判超时的兜底上限（M3 实测收紧）
-#define RS485_TX_GUARD_MS    10     // 发送完成后总线占用检测窗口（M3 实测收紧）
+#define RS485_BAUD                  9600   // 已确认为最终值（9600，8N1，无校验，设备地址 1）
+#define RS485_RX_PIN                20     // UART1 RX = GPIO20（经分压后接入）
+#define RS485_TX_PIN                21     // UART1 TX = GPIO21
+#define RS485_TX_GUARD_MS           2      // 发送完成后的保护间隔：等总线稳定后再开始收
+#define RS485_FIRST_BYTE_TIMEOUT_MS 80     // 一级：等首个字节的时限
+#define RS485_CHAR_TIMEOUT_MS       4      // 二级：字节间静默即判本帧结束（≈4 个字符时间）
+#define RS485_FRAME_MAX_MS          300    // 三级：整帧兜底，防死等
+#define RS485_STATS_EVERY_N         100    // 每 N 次回环打印一次累计统计
