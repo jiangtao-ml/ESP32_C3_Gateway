@@ -18,7 +18,7 @@
 
 三、硬件清单与接线规范（⚠️ 致命警告）
 
-- 主控板：ESP32-C3 SuperMini（工作逻辑电压 3.3V，使用 HardwareSerial(1)，RX=GPIO20，TX=GPIO21）
+- 主控板：ESP32-C3 SuperMini（工作逻辑电压 3.3V，使用 HardwareSerial(1)，RX=GPIO20，TX=GPIO21）。主控板 PCB 型号为 HW-466AB（板载标签）。
 - 扩展底板：HW566 V0.0.1 扩展板（提供 5V、3.3V、锂电池供电接口）。面包板原型阶段（阶段三）先不使用 HW566，直接由电脑 USB 给 ESP32-C3 供电、由 SuperMini 的 5V 引脚给 MAX13487 供电；HW566 留到成品阶段（阶段四/五）上锂电池时再用。此决定已由总控确认。
 - 通信模块：MAX13487 RS-485 模块（+5V 供电，AutoDirection 自动方向控制，无需 DE/RE 控制引脚）
 - ⚠️ 致命接线警告（必须遵守）：
@@ -43,7 +43,7 @@
 五、当前进度与待确认盲区
 
 - 当前进度：
-  - 硬件已拍照确认（ESP32-C3 SuperMini、HW566 V0.0.1 扩展板、MAX13487模块、面包板已就位）。
+  - 硬件已拍照确认（ESP32-C3 SuperMini 主控板，PCB 型号 HW-466AB；HW566 V0.0.1 扩展底板；MAX13487 RS-485 模块；面包板，均已就位）。
   - Arduino IDE 2.3.10 已安装（Windows）。
   - 工程目录结构已规划（01_firmware, 02_docs, 03_logs, 04_ai_prompts, 05_hardware, 06_tests）。
   - 任务书 v0.1 已完成（02_docs/01_项目任务书.md），技术审查报告已完成（02_docs/02_任务书技术审查_Codex.md），v0.2 待出。COM号待查询。
