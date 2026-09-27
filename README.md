@@ -79,6 +79,8 @@ ESP32_C3_Gateway/
 - 建立 `README.md`（项目名称、目标、目录说明、当前阶段）；
 - 建立 `.gitignore`（忽略 Arduino 编译产物、日志临时文件、IDE 配置）；
 - 初始化 Git 仓库并完成首次提交。
+- 建立 `04_ai_prompts/00_context.md`（项目唯一事实来源）
+- 建立 `README.md` 第 8 节“当前盲区/待办”
 
 **本阶段明确不做：**
 
@@ -102,7 +104,7 @@ ESP32_C3_Gateway/
 ### 6.1 硬件清单
 
 - 主控：ESP32-C3 SuperMini，3.3V 逻辑，使用 HardwareSerial(1)，RX=GPIO20，TX=GPIO21
-- 扩展底板：HW566 扩展板（提供 5V、3.3V、锂电池供电接口）
+- 扩展底板：HW566 V0.0.1 扩展板（提供 5V、3.3V、锂电池供电接口）。面包板原型阶段（阶段三）暂不使用；直接由电脑 USB 给 ESP32-C3 供电，由 SuperMini 的 5V 引脚给 MAX13487 供电。HW566 留到阶段四/五上锂电池时再启用。
 - 通信模块：MAX13487 RS-485 模块，+5V 供电，AutoDirection 自动方向控制，无需 DE/RE 控制引脚；EN 引脚悬空或接 3.3V（自动收发）
 
 ### 6.2 ⚠️ 安全约束（必须遵守）
