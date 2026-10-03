@@ -16,7 +16,16 @@
  *   - 不引入第三方库（仅用 ESP32 core 自带的 WiFi / WiFiUdp / time / HardwareSerial）
  *   - ⚠️ USB CDC On Boot 必须 = Enabled：否则 Serial 会落到 UART0（GPIO20/21），
  *     与 UART1 争用同一对引脚
- *   - ⚠️ MAX13487 的 RXO 为 5V 时必须先 1kΩ/2kΩ 分压再进 GPIO20；EN 保持断开
+ *   - ⚠️ 485 模块的 RXO 为 5V 时必须先 1kΩ/2kΩ 分压再进 GPIO20
+ *   - ⚠️ EN 接法随实物主芯片型号而定（接线前先读 8 脚芯片丝印）：
+ *     MAX13487 / MAX13488（5V 双向，芯片无 DE 脚）-> EN 接固定高电平（模块 VCC/5V），
+ *       不得悬空 / 接 GND / 动态切换（悬空若对应 SHDN# 会关断器件，症状即 RX=0）；
+ *     MAX485 / MAX3485（单向，EN 即方向控制脚）-> EN 必须接 GPIO 由固件切换，严禁固定接高。
+ *       固件已内建方向控制：把 config.h 的 RS485_DE_PIN 设为实际 GPIO 号即启用（默认 -1 = 不启用）。
+ *     见 00_context.md 三.5。
+ *   - ⚠️【待复核·高优先】实物 485 模块主芯片型号：用户口述为 MAX13487，但商品页为三合一款
+ *     （MAX3485 / MAX485 / MAX13487）、渲染图丝印为 MAX485 ESA。若复核为单向芯片，则
+ *     "AutoDirection 无需方向控制"这一前提不成立，必须增加方向控制 GPIO 与收/发切换时序。
  *
  * 事实来源：04_ai_prompts/00_context.md
  * 编译设置：Arduino IDE -> Tools -> USB CDC On Boot = Enabled
@@ -57,13 +66,14 @@ static uint32_t     g_lastWifiCheckMs  = 0;
 static uint32_t     g_lastReconnectMs  = 0;
 static uint32_t     g_reconnectCount   = 0;
 static uint32_t     g_lastNtpCheckMs   = 0;
+static uint32_t     g_lastNtpTriggerMs = 0;   // 上次触发 configTzTime 的时刻（未同步时按 NTP_RETRY_INTERVAL_MS 重试）
 static bool         g_linkUp           = false;  // 当前 WiFi 是否已连上
 static bool         g_everConnected    = false;  // 是否曾经连上过（决定首次 begin 失败后的重试方式）
 static bool         g_timeSynced       = false;
 static bool         g_ntpResyncPending = false;  // 重连成功后置位，下一轮重新触发 SNTP
 
 static WiFiUDP g_udp;
-static char    g_payload[160];
+static char    g_payload[384];   // M5 最坏情况约 255 字节（时间戳 19 + " | " 3 + 39 寄存器 HEX 233），留足余量
 
 // ---------------------------------------------------------------
 // RS-485 收发缓冲（M4）
@@ -193,6 +203,7 @@ static void ntpTick() {
   if (g_ntpResyncPending) {
     g_ntpResyncPending = false;
     // ⚠️ 必须在 WiFi 连上之后调用：网络未就绪时 SNTP 初始化会失败，表现为永不对时
+    g_lastNtpTriggerMs = millis();
     configTzTime(NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
     Serial.printf("[NTP] WiFi 已连上 -> 触发 SNTP 对时 TZ=%s 主=%s 备=%s\n",
                   NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
@@ -203,6 +214,17 @@ static void ntpTick() {
 
   struct tm now;
   bool synced = getLocalTime(&now, 0);
+
+  // 未同步：按 NTP_RETRY_INTERVAL_MS 周期重新触发 SNTP（任务书 §6.1.2 要求 60s 重试）
+  // 前提：WiFi 已连上（否则会重现“网络未就绪就初始化 SNTP”的故障）
+  if (g_linkUp && !synced &&
+      (uint32_t)(millis() - g_lastNtpTriggerMs) >= NTP_RETRY_INTERVAL_MS) {
+    g_lastNtpTriggerMs = millis();
+    configTzTime(NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
+    Serial.printf("[NTP] 仍未同步，重试 SNTP（周期 %lu ms）\n",
+                  (unsigned long)NTP_RETRY_INTERVAL_MS);
+  }
+
   if (synced == g_timeSynced) return;
 
   g_timeSynced = synced;
@@ -220,13 +242,34 @@ static void ntpTick() {
 // 状态机
 // ---------------------------------------------------------------
 static void sendUdpPayload() {
+  // WiFi 未连接：beginPacket 必然失败，若照发会每秒刷一条 [UDP][ERR] 掩盖真正的问题。
+  // 此处直接跳过并做 5s 节流提示，保证日志只在"已联网但仍发不出去"时报错。
+  if (!g_linkUp) {
+    static uint32_t lastNoLinkLogMs = 0;
+    if ((uint32_t)(millis() - lastNoLinkLogMs) >= 5000) {
+      lastNoLinkLogMs = millis();
+      Serial.println("[UDP] WiFi 未连接，本秒跳过上行（等待 wifiTick 重连）");
+    }
+    return;
+  }
+
   char ts[32];
   bool synced = buildTimestamp(ts, sizeof(ts));
-  snprintf(g_payload, sizeof(g_payload), "%s | %s", ts, synced ? "M2_HEARTBEAT" : "UNSYNCED");
+  int n = snprintf(g_payload, sizeof(g_payload), "%s | %s", ts, synced ? "HEARTBEAT" : "UNSYNCED");
+  if (n < 0 || (size_t)n >= sizeof(g_payload)) {      // 缓冲不足会被静默截断，必须显式告警
+    Serial.printf("[UDP][ERR] payload 缓冲不足：需要 %d 字节 / 缓冲 %u，本包已截断\n",
+                  n, (unsigned)sizeof(g_payload));
+  }
 
-  g_udp.beginPacket(UDP_TARGET_IP, UDP_TARGET_PORT);
-  g_udp.write((const uint8_t *)g_payload, strlen(g_payload));
-  g_udp.endPacket();
+  bool udpOk = (g_udp.beginPacket(UDP_TARGET_IP, UDP_TARGET_PORT) == 1);   // 不判返回值会让日志说谎：发失败仍打印“已发”
+  if (udpOk) {
+    g_udp.write((const uint8_t *)g_payload, strlen(g_payload));
+    udpOk = (g_udp.endPacket() == 1);
+  }
+  if (!udpOk) {
+    Serial.printf("[UDP][ERR] 发送失败（beginPacket/endPacket 未返回 1），目标 %s:%u\n",
+                  UDP_TARGET_IP, (unsigned)UDP_TARGET_PORT);
+  }
 
   Serial.printf("[UDP -> %s:%u] %s\n", UDP_TARGET_IP, (unsigned)UDP_TARGET_PORT, g_payload);
 }
@@ -254,7 +297,35 @@ static void parseResponse() {
     return;
   }
 
-  // (2) 帧长异常：M4 期望固定 9 字节
+  // (2) 从站异常响应（addr + func|0x80 + 异常码 + CRC2 = 5 字节）
+  //     必须放在“帧长 == 期望帧长”判定之前：否则 5 字节异常帧会先被判成“帧长异常”（原实现还会先被判成“超时”）。
+  //     M5 接入 QI 真机时，“真机拒绝 00 27”的表现正是 01 84 xx yy zz，此分支是主要诊断依据（E-02）。
+  if (g_rxLen >= 5 && (g_rxFrame[1] & 0x80)) {
+    const uint16_t crcR = (uint16_t)g_rxFrame[g_rxLen - 2] |
+                          ((uint16_t)g_rxFrame[g_rxLen - 1] << 8);
+    const uint16_t crcC = modbusCRC16(g_rxFrame, (size_t)(g_rxLen - 2));
+    if (crcC != crcR) {
+      g_statFail++;
+      Serial.printf("[M4] 异常响应 CRC 失败 期望 %04X 计算 %04X\n",
+                    (unsigned)crcR, (unsigned)crcC);
+      logRxHex();
+      return;
+    }
+    if (g_rxFrame[0] != RS485_SLAVE_ADDR) {
+      g_statFail++;
+      Serial.printf("[M4] 异常响应地址不匹配 期望 %u 收到 %u\n",
+                    (unsigned)RS485_SLAVE_ADDR, (unsigned)g_rxFrame[0]);
+      logRxHex();
+      return;
+    }
+    g_statFail++;   // 异常响应属于合法帧但代表从站报错，计入失败便于统计
+    Serial.printf("[M4] 从站异常响应 FUNC=0x%02X 异常码=0x%02X（参见 06_QI协议说明.md §7 E-02）\n",
+                  (unsigned)g_rxFrame[1], (unsigned)g_rxFrame[2]);
+    logRxHex();
+    return;
+  }
+
+  // (3) 帧长异常：M4 期望固定 9 字节
   if (g_rxLen != g_expectRxLen) {
     g_statFail++;
     Serial.printf("[M4] 帧长异常 期望 %u 收到 %u\n",
@@ -262,7 +333,7 @@ static void parseResponse() {
     logRxHex();
     // 常见误因：MAX13487 的 RE#/EN 被常开使能 -> 自己的请求被回读（RX 帧 == TX 帧，8 字节）
     if (g_rxLen == MODBUS_TX_LEN && memcmp(g_rxFrame, g_txFrame, MODBUS_TX_LEN) == 0) {
-      Serial.println("      [诊断] RX 帧 == TX 帧：疑似自发自收回显（查 MAX13487 的 EN/RE# 接线，EN 应断开）");
+      Serial.println("      [诊断] RX 帧 == TX 帧：疑似自发自收回显（若为 MAX485/MAX3485 说明 EN 被固定接高 -> 应改接 GPIO 由固件切换；若为 MAX13487 则按 00_context.md 三.5 核对）");
     }
     return;
   }
@@ -283,14 +354,7 @@ static void parseResponse() {
     return;
   }
 
-  // (4) 功能码匹配：最高位置 1 = 从站异常响应，次字节为异常码
-  if (func & 0x80) {
-    g_statFail++;
-    Serial.printf("[M4] 从站异常响应 FUNC=0x%02X 异常码=0x%02X\n",
-                  (unsigned)func, (unsigned)g_rxFrame[2]);
-    logRxHex();
-    return;
-  }
+  // (4) 功能码匹配：异常响应（最高位置 1）已在 (2) 处提前处理，此处只判正常响应
   if (func != MODBUS_FUNC_READ_HOLDING && func != MODBUS_FUNC_READ_INPUT) {
     g_statFail++;
     Serial.printf("[M4] 功能码不匹配 期望 0x%02X/0x%02X 收到 0x%02X\n",
@@ -379,8 +443,19 @@ static void stateTick() {
       while (Serial1.available()) (void)Serial1.read();
 
       memcpy(g_txFrame, MODBUS_TEST_FRAME_BYTES, MODBUS_TX_LEN);
+#if RS485_DE_PIN >= 0
+      // MAX485 / MAX3485 半双工：先把方向切到发送，否则帧根本上不了总线
+      digitalWrite(RS485_DE_PIN, RS485_DE_ACTIVE_HIGH ? HIGH : LOW);
+#endif
       Serial1.write(g_txFrame, MODBUS_TX_LEN);
       Serial1.flush();                                     // 等 8 字节全部移出（9600 下约 8.3ms，有界阻塞）
+#if RS485_DE_PIN >= 0
+      // ⚠️ ESP32 的 flush() 只保证 TX FIFO 排空，不保证移位寄存器已把最后一位送完；
+      //    立刻切回接收会把末字节截断（RS-485 经典坑；9600 下一个字符 ≈ 1.04ms）。
+      //    故先有界等待 >= RS485_TX_GUARD_MS（默认 2ms），再切回接收。
+      for (uint32_t t0 = millis(); (uint32_t)(millis() - t0) < RS485_TX_GUARD_MS; ) { }
+      digitalWrite(RS485_DE_PIN, RS485_DE_ACTIVE_HIGH ? LOW : HIGH);
+#endif
 
       g_rxLen         = 0;
       g_rxOverflow    = false;
@@ -402,10 +477,29 @@ static void stateTick() {
         g_tRxLastByteMs = millis();
       }
 
-      if (g_rxLen >= g_expectRxLen) {                      // 帧长驱动：收满预期帧长即止
-        g_state = ST_PARSE;
-        break;
+      // 帧长驱动：按已收到的帧头动态推算本帧应到长度，收满即止
+      //   - 异常响应：addr + (func|0x80) + 异常码 + CRC2 = 固定 5 字节
+      //   - 正常响应：addr + func + byteCount + N + CRC2 = byteCount + 5
+      //   - 帧头不足 2/3 字节时回退到常量 g_expectRxLen
+      //   - ⚠️ 回环自测模式（RS485_MODE_LOOPBACK_SELFTEST=1）【不可】用此推算：
+      //     该模式下"响应"就是请求帧本身，byte[2] 是寄存器地址（0x00）而不是字节数，
+      //     推算会把 8 字节的期望帧误缩成 5 字节 -> 每次必报 FAIL。该模式固定用 g_expectRxLen。
+#if RS485_MODE_LOOPBACK_SELFTEST
+      if (g_rxLen >= g_expectRxLen) { g_state = ST_PARSE; break; }
+#else
+      {
+        uint8_t need = g_expectRxLen;
+        if (g_rxLen >= 2 && (g_rxFrame[1] & 0x80)) {
+          need = 5;                                        // 从站异常响应：固定 5 字节
+        } else if (g_rxLen >= 3 &&
+                   (g_rxFrame[1] == MODBUS_FUNC_READ_HOLDING ||
+                    g_rxFrame[1] == MODBUS_FUNC_READ_INPUT)) {
+          uint16_t bc = g_rxFrame[2];                      // 仅当功能码确认为读寄存器时才把 byte[2] 当字节数
+          if ((uint32_t)bc + 5U <= (uint32_t)MODBUS_RX_BUF_MAX) need = (uint8_t)(bc + 5U);
+        }
+        if (g_rxLen >= need) { g_state = ST_PARSE; break; }
       }
+#endif
       if (g_rxOverflow) {                                  // 已超过缓冲上限，不必再等
         g_state = ST_PARSE;
         break;
@@ -455,6 +549,9 @@ static void stateTick() {
 // ---------------------------------------------------------------
 void setup() {
   Serial.begin(115200);                    // USB CDC（Tools -> USB CDC On Boot = Enabled）
+  // USB CDC 需要主机枚举完成后才有输出；此前打的日志会丢。
+  // 仅在 setup 内有界等待（最多 2s），不影响 loop() 的非阻塞约束。
+  for (uint32_t t0 = millis(); !Serial && (uint32_t)(millis() - t0) < 2000; ) delay(10);
 
   // ---- WiFi：静态 IP + 最小自恢复 ----
   WiFi.mode(WIFI_STA);
@@ -483,6 +580,13 @@ void setup() {
   // ---- UART1（RS-485 侧）：9600 8N1，begin 形参顺序为 (baud, config, RX, TX) ----
   Serial1.begin(RS485_BAUD, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
   Serial1.setTimeout(0);                   // read() 绝不阻塞；超时判定全部交给 millis()
+#if RS485_DE_PIN >= 0
+  // 方向控制引脚：上电先置于接收态，避免刚上电就占住总线
+  pinMode(RS485_DE_PIN, OUTPUT);
+  digitalWrite(RS485_DE_PIN, RS485_DE_ACTIVE_HIGH ? LOW : HIGH);
+  Serial.printf("[485] 方向控制已启用 EN=GPIO%d（%s 为发送态）\n",
+                (int)RS485_DE_PIN, RS485_DE_ACTIVE_HIGH ? "高电平" : "低电平");
+#endif
   Serial.printf("[485] UART1 就绪 baud=%lu 8N1 RX=GPIO%d TX=GPIO%d\n",
                 (unsigned long)RS485_BAUD, (unsigned)RS485_RX_PIN, (unsigned)RS485_TX_PIN);
 
@@ -490,7 +594,10 @@ void setup() {
   Serial.println("[485] 模式=M3 物理回环自测：请短接 GPIO21 <-> GPIO20，且不接 MAX13487");
 #else
   Serial.println("[485] 模式=真实 485 总线：ESP32(TX) -> MAX13487 -> 电脑 USB 转 485（Modbus 从站）");
-  Serial.println("[485] ⚠️ RXO 必须 1k/2k 分压后接 GPIO20；EN 保持断开；三方必须共地");
+  Serial.println("[485] ⚠️ RXO 先万用表实测空闲电平：5V 必须 1k/2k 分压后接 GPIO20，3.3V 则直连不分压（未实测前按 5V 处理）；EN 接法随芯片型号（先读丝印，见 00_context.md 三.5）；三方必须共地");
+  Serial.printf("[485] 方向控制：%s\n", (RS485_DE_PIN >= 0)
+                ? "EN 由 GPIO 动态切换（MAX485 / MAX3485 接法，RS485_DE_PIN 已配置）"
+                : "无（EN 固定电平，MAX13487 / MAX13488 接法；RS485_DE_PIN = -1）");
 #endif
   {
     char txHex[3 * MODBUS_TX_LEN + 1];
