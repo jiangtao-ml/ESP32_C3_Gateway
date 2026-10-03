@@ -58,15 +58,30 @@
 // ---------------------------------------------------------------
 #define RS485_BAUD                  9600   // 已确认为最终值（9600，8N1，无校验，设备地址 1）
 #define RS485_RX_PIN                20     // UART1 RX = GPIO20（经分压后接入）
+                                           // ⚠️ R-13：M4 接线曾 5V 直入本脚（ESP32-C3 IO 绝对最大 3.6V），输入通路可能已受损。
+                                           //    排障顺序：先用 RS485_MODE_LOOPBACK_SELFTEST=1 + 短接 GPIO21↔GPIO20 验证本脚；
+                                           //    若回环异常，改用 GPIO3 / GPIO4 / GPIO5 / GPIO10 作 UART1 RX，并同步改本行与文档。
 #define RS485_TX_PIN                21     // UART1 TX = GPIO21
-#define RS485_TX_GUARD_MS           2      // 发送完成后的保护间隔：等 MAX13487 方向切回接收后再收
+#define RS485_TX_GUARD_MS           2      // 发送→接收的方向切换保护间隔（AutoDirection 换向余量）
+                                           // 说明：Serial1.flush() 在本 core（3.3.10）会一直等到 TX 完全空闲
+                                           //   （HardwareSerial::flush → uartFlush → uartFlushTxOnly(uart, true) → uart_ll_is_tx_idle：
+                                           //    txfifo_cnt==0 且 TX 状态机回到 IDLE），所以 2ms 不用于补 flush 的不足，
+                                           //   仅为换向留防御性余量（MAX13487 手册 tDDD + tRED ≤ 2.6µs；MAX485 变体切换 DE 同理）。
                                            // ⚠️ M4 真实总线上若稳定丢首字节，先把它调到 3~5ms 复测
 #define RS485_FIRST_BYTE_TIMEOUT_MS 80     // 一级：等首个字节的时限
 #define RS485_CHAR_TIMEOUT_MS       4      // 二级：字节间静默阈值（≈4 个字符时间）。t3.5 框尾静默对应 9600 下约 4ms，超过即判本帧结束（半帧）
+                                           // ⚠️ R-15（待实测）：电脑端 USB 转 485 从站若出现「每秒 TIMEOUT、RX=1~8」的假故障，
+                                           //    先把本值临时放到 20~30ms 复测；M5 接真机（纯硬件 UART）后再收紧到 4~8ms。
+                                           //    本值只决定帧尾判定的宽松度，不影响 1s 轮询节奏（三级兜底仍为 300ms）。
 #define RS485_FRAME_MAX_MS          300    // 三级：整帧兜底，防死等
 // ---- 方向控制（EN / DE-RE#）：⚠️ 接法随实物主芯片型号，接线前必须先用放大镜读 8 脚芯片丝印 ----
 //   ① MAX13487 / MAX13488（+5V，AutoDirection，芯片无 DE 脚）：EN 接固定高电平（模块 VCC/5V），
 //      本项保持 -1 —— 固件不参与方向控制（不得动态切换，见 00_context.md 三.5 ①）。
+//      模块丝印的 EN 可能引到芯片三种脚，处置在接固定高下一致，但诊断思路不同：
+//        EN=RE#   -> 高 = 交给 AutoDirection 状态机（正常收发）；低 = 强制 RO 常开（会自发自收）
+//        EN=SHDN# -> 高 = 正常工作；低 = 关断器件（症状 RX=0，模块可能发热）
+//        EN=DE    -> 高 = 发送（MAX485 变体）；固定接高会占死总线
+//      以上三种脚均为标准 CMOS 输入（VIH 2.0V / VIL 0.8V），3.3V 与 5V 逻辑均可驱动。
 //   ② MAX485 / MAX3485（单向半双工，EN 即方向控制脚）：EN 必须接一个空闲 GPIO，并把该 GPIO 号
 //      填到本项 —— 固件发送前拉高 EN、发送完成并等满保护间隔后拉低。严禁固定接高
 //      （常使能会占死总线：自己发的字节被自己收回来，从站永远无法应答）。

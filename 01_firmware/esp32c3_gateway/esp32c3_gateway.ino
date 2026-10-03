@@ -11,7 +11,7 @@
  *        M4 只用 0x03 报文在「电脑端 Modbus 从站」上验证物理链路与解析正确性
  *
  * 硬约束：
- *   - 全程 millis() 非阻塞调度，禁止 delay()
+ *   - 全程 millis() 非阻塞调度，禁止 delay()（唯一例外：setup() 内有界等待 USB CDC 枚举，最多 2s）
  *   - WiFi 凭据只来自 secrets.h（不入库），本文件不出现任何凭据明文
  *   - 不引入第三方库（仅用 ESP32 core 自带的 WiFi / WiFiUdp / time / HardwareSerial）
  *   - ⚠️ USB CDC On Boot 必须 = Enabled：否则 Serial 会落到 UART0（GPIO20/21），
@@ -450,8 +450,10 @@ static void stateTick() {
       Serial1.write(g_txFrame, MODBUS_TX_LEN);
       Serial1.flush();                                     // 等 8 字节全部移出（9600 下约 8.3ms，有界阻塞）
 #if RS485_DE_PIN >= 0
-      // ⚠️ ESP32 的 flush() 只保证 TX FIFO 排空，不保证移位寄存器已把最后一位送完；
-      //    立刻切回接收会把末字节截断（RS-485 经典坑；9600 下一个字符 ≈ 1.04ms）。
+      // 说明：本 core（3.3.10）的 flush() = uartFlushTxOnly(uart, true)，会一直等到 TX 完全空闲
+      //   （txfifo_cnt==0 且 TX 状态机回到 IDLE），即移位寄存器已把最后一位送完，
+      //   所以下面的等待不是为了补 flush 的不足，而是给 DE/AutoDirection 换向留防御性余量
+      //   （MAX13487 手册 tDDD + tRED ≤ 2.6µs；9600 下一个字符 ≈ 1.04ms）。
       //    故先有界等待 >= RS485_TX_GUARD_MS（默认 2ms），再切回接收。
       for (uint32_t t0 = millis(); (uint32_t)(millis() - t0) < RS485_TX_GUARD_MS; ) { }
       digitalWrite(RS485_DE_PIN, RS485_DE_ACTIVE_HIGH ? LOW : HIGH);

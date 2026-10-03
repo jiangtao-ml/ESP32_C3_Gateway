@@ -201,7 +201,7 @@
 | 9.2 | `RE` 该接什么 | “Drive RE low to enable the RO. **Drive RE high to let the AutoDirection circuit control the receiver.**” | **RE 高 = 交给 AutoDirection（正常收发，且是热插拔后的默认态）**；RE 低 = 强制 RO 常开 |
 | 9.3 | `SHDN` 该接什么 | “Drive SHDN high to let the device operate in normal operation. Drive SHDN low to put the part in shutdown.” | **SHDN 高 = 正常**，低 = 关断 → “接固定高电平”正确 |
 | 9.4 | **EN 接法裁定** | 9.2 + 9.3 | **① MAX13487/88 → EN 接固定高电平**：在手册 `RE` / `SHDN` 两种诠释下**均成立**，文档口径获手册背书 ✅；② MAX485/3485 → EN 即 `DE`（高 = 发送），固定接高会占死总线，文档口径**正确** ✅ |
-| 9.5 | **偏置电阻是必需项（本轮新发现）** | “Pullup and Pulldown Resistors” 一节：**“are required for proper operation of the device”**；无偏置时 AutoDirection 状态机会**保持驱动器使能** | 文档原把“4.7kΩ 偏置实测”列为**备注**，应升级为 **M3 功能验收项** —— 模块若无偏置，**从站永远收不到应答**（症状与“模块坏了”极像，会导致误判）→ 已回写 CTX 三.4 |
+| 9.5 | **偏置电阻是必需项（本轮新发现）** | “Pullup and Pulldown Resistors” 一节：**“are required for proper operation of the device”**；Detailed Description：“the driver stays enabled until (A-B) > VDT, and then disables the driver, letting the pullup/pulldown resistors hold the A and B lines in the correct state” | 文档原把“4.7kΩ 偏置实测”列为**备注**，应升级为 **M3 功能验收项**。⚠️ **2026-10-03 二次修订**：初版机理“无偏置 → 状态机保持驱动器使能 → 占死总线”**有误** —— 驱动器每次都会自行释放，真实症状是“1”位塌陷 → 数据错乱 / CRC 全败 / 空闲电平不定。功能项结论不变 → 已回写 CTX 三.4 |
 | 9.6 | `DI` 空闲态要求 | “require the DI input be driven high to remain in the idle state” | ESP32 UART TX 空闲即高（mark），**天然满足**，无需改代码 ✅ |
 | 9.7 | 供电 | “VCC = +5V ±5%” | 与文档一致（MAX3485 变体才是 3.3V）✅ |
 
@@ -223,7 +223,7 @@
 | # | 复验项 | 方法 | 结果 |
 | --- | --- | --- | --- |
 | 10.1.1 | 编译 | `arduino-cli v1.5.1`，`--fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc` | ✅ Flash 997299 B (76%) / RAM 38244 B (11%)，零错零警告（与 §4.16 一致） |
-| 10.1.2 | 明文凭据 | `git grep -c -I "zzy128104"`（工作区 + 全部历史提交） | ✅ 0 命中 |
+| 10.1.2 | 明文凭据 | `git grep -c -I "<WiFi密码明文>"`（工作区 + 全部历史提交） | ⚠️ **2026-10-03 更正**：工作区 0 命中；但本行初版把**明文密码**写进了示例命令，导致 grep 命中报告自身（既自相矛盾又构成泄漏）——已改为占位符。历史提交含明文者共 4 个：`8ef8576`/`e8612d4`/`ca21014`/`aabe7d8`，见 §12.2 |
 | 10.1.3 | CRC 全量重算 | 脚本扫描 `06_QI协议说明.md` / `STB3-125_Errata.md` / `README.md` 内全部 HEX 帧，逐条 CRC16/Modbus 重算 | ✅ 61 条通过；8 处“不一致”全部可预期解释（见 10.2），**无新增错误帧** |
 | 10.1.4 | `esp-x32` 残留 | `git grep -c -I` | ✅ 5 处全部为「esp-x32 有误」的勘误引用，无语义残留 |
 | 10.1.5 | 商品页证据 | 用户附件两张商品页截图逐字核对 | 🟠 新增佐证 1 条 + 冲突 1 条，见 F-1 |
@@ -240,8 +240,151 @@
 
 ### 10.3 本轮新增发现（提示级，均非“错误”）
 
-- **F-1（R-14 · 商品页证据）**：页面明示 MAX13487 变体「不能通过 EN 脚切换方向，不然烧坏电脑，后果自负」→ **佐证** CTX 三.5 ①；但同一页面**只写「具有 120 欧匹配电阻」，未提 4.7kΩ 偏置电阻** → 与 CTX 三.4 的既有描述**冲突**，偏置是否板载**必须实物确认**（缺偏置会让 AutoDirection 占死总线，见第 9 节手册核实）。
+- **F-1（R-14 · 商品页证据）**：页面明示 MAX13487 变体「不能通过 EN 脚切换方向，不然烧坏电脑，后果自负」→ **佐证** CTX 三.5 ①；但同一页面**只写「具有 120 欧匹配电阻」，未提 4.7kΩ 偏置电阻** → 与 CTX 三.4 的既有描述**冲突**，偏置是否板载**必须实物确认**（⚠️ 2026-10-03 二次修订：缺偏置的症状是“1”位塌陷 → CRC 全败 / 空闲电平不定，**不是**驱动器锁死；见 §9.5 与 §11.3）。
 - **F-2（R-15 · M4 关键）**：`RS485_CHAR_TIMEOUT_MS = 4ms` 对**电脑模拟从站（经 USB 转 485）**过紧。USB 批量交付会造成 >4ms 的字节间隙，被第 2 级超时提前判「半帧」，现象为**每秒都 `[M4] 超时 ... RX=1~8`**，极易误判成模块坏 / 接线错。**M4 期间建议临时放到 20~30ms；M5 接真机（纯硬件 UART）后改回 4ms。** 本项与 §4.4 的“5~6ms”是同一问题的更强档位，不冲突。
 - **F-3（低优先）**：ESP32-C3 每次复位时 ROM/bootloader 会在 GPIO21 打印启动日志，这些字节会经 485 模块上总线（115200），排查「上电瞬间总线异常」时先想到它；另需目视确认主控板是否带 CH340 等 USB 转串口芯片并占用 GPIO20/21。
 
 > 三条均已回写：根 `README.md` §8 第 12~14 条、`01_firmware/esp32c3_gateway/README.md`（新增命令行编译块 + M4 字符间隔提示）、`04_ai_prompts/00_context.md` 三.5 商品页佐证句。
+---
+
+## 11. 第 7 轮审查（2026-10-03 · Codex）—— 实物照片鉴定 + AutoDirection 偏置/终端与 VDT 的冲突风险
+
+本轮输入：用户 5 张实物照片（本轮附件）＋ 上一轮商品页截图；手段：arduino-cli 编译复验、MAX13487E/MAX13488E 官方手册（已入库 `05_hardware/MAX13487E_MAX13488E_Datasheet.pdf`）逐条比对、arduino-esp32 core 3.3.10-cn 源码核查、全仓库 CRC 重算。
+
+### 11.1 实物照片鉴定（4 项证据落地）
+
+| # | 照片 | 可见内容 | 结论 |
+| --- | --- | --- | --- |
+| 11.1.1 | `5d0a5741b91988b67573052ef2019e62.jpg`（485 模块正面） | 8 脚 SOIC 主芯片；同一排三颗贴片电阻丝印 **`472` / `121` / `472`**（=4.7kΩ / 120Ω / 4.7kΩ），紧邻 A/B 侧 | **板载偏置 + 终端“在板上存在”的证据成立**（R-14 由“未核实”降级为“视觉证据充分，待万用表终判”）。三项各自的实际连接须按 §11.5 实测确认 |
+| 11.1.2 | `93b49348257cccaa33bbccc7621dbf60.jpg`（485 模块背面） | 逻辑侧 5 脚丝印 **`GND / TXD / RXD(或 RXO) / VCC / EN`**；总线侧 3 脚丝印 **`GND / A / B`**；板号 **`RS485 V2.05`**、`1901Y_GD4627Z1` | 模块丝印确实写作 `RXO/RXD`（同一脚，分辨率所限无法 100% 区分 D/O）→ Q-11 术语口径再获实证；**模块总线侧自带 GND 端子**（与 ESP32 共地可直接在此端子上取） |
+| 11.1.3 | `48879669db253aa69b6fe9fafce6ead6.jpg` + `3a51c3ed366b83e81878038c0a5b9cf9.jpg`（主控板） | `HW-466AB` / `ESP32-C3` / `SuperMini`；引脚丝印：左列 `5V, G, 3.3, 4, 3, 2, 1, 0`，右列 `5, 6, 7, 8, 9, 10, 20, 21` | 与 CTX 三.1 完全一致 ✅；**GPIO20/21 在 USB-C 对侧那一排的末端**（接线时先认丝印）；GPIO18/19（原生 USB）未引出 → 不会与 UART1 抢脚 |
+| 11.1.4 | `0fbf26957ce46fdd4b45b15d66a2a3d7.jpg`（主控板正面） | USB-C + BOOT/RESET 双按键 + QFN 封装的 ESP32-C3 + 晶振；**未见 CH340 一类 USB 转串口 SOIC** | 倾向“原生 USB CDC”（低置信度，受分辨率限制）→ 与固件要求的 `USB CDC On Boot = Enabled` 一致；**若烧录异常再按 R-13/R-16 复查** |
+
+- **H-1（模块主芯片型号）仍未闭环**：对 `5d0a5741` 芯片区域做了 6 倍放大 + 局部 2%~98% 对比度拉伸 + 灰度 + UnsharpMask(4/250) 处理，丝印仍是**纯噪点**（原图 972×1394，芯片仅约 100 px 宽）。**不猜型号**；需用户补一张**微距照**（对焦芯片、打光、距离 3~5 cm）或直接用放大镜口述丝印。
+- 参考物：上一轮商品页截图 `60ba44f182cf8fe17dcd0ad735faba1f.jpg` 显示的是**同一块 PCB**（`RS485 V2.05` / `1901Y_GD4627Z1`，渲染芯片丝印 `MAX485 ESA`，同样三颗 `472/121/472`）→ 页面渲染图**不能代表实物芯片**，仅能证明“同板型多芯片变体”。
+
+### 11.2 独立复验结果（本轮实测）
+
+| 项 | 方法 | 结果 |
+| --- | --- | --- |
+| 编译 | `arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc 01_firmware/esp32c3_gateway` | ✅ Flash **997299 B (76%)** / RAM **38244 B (11%)**，零错零警告（与 §10.1.1 一致） |
+| CRC 重算 | 脚本扫描 `06_QI协议说明.md` / `STB3-125_Errata.md` / `README.md` / `config.h` 内全部 HEX 帧 | ✅ 无新增错误帧；不一致项全部可预期（`90 48` 笔误、无 CRC 的载荷片段） |
+| 明文凭据 | `git grep -c -I`（工作区） | ✅ 0 命中 |
+| 仓库状态 | `git status --short` | ✅ 改动前干净，HEAD=`aabe7d8` |
+
+### 11.3 ⚠️【本轮新发现 · 高风险】偏置/终端组合可能与 AutoDirection 的 VDT 冲突
+
+**手册依据（逐条摘自 `MAX13487E_MAX13488E_Datasheet.pdf`）：**
+
+1. 引脚：`1 RO / 2 RE / 3 SHDN / 4 DI / 5 GND / 6 A / 7 B / 8 VCC`，**全片无 DE**。
+2. 发送功能表：`SHDN=1, DI=1, A-B > VDT = True → Turn driver OFF`（高阻）；`A-B > VDT = False 且驱动器原为 ON → keep it ON`。
+3. **`VDT`（Driver Disable Threshold）TYP **`+0.6 V`**，MAX **`+1 V`**；Note 2 原文：“This is a differential voltage from A to B that the driving device must see on the bus to disable its driver.”
+4. 接收功能表：`RE=1`（AutoDirection 模式）时，**驱动器 ON → 接收器 OFF**；驱动器 OFF → 接收器 ON。`RE=0` 时接收器**常开**。
+5. “Pullup and Pulldown Resistors: … **are required for proper operation of the device**”。
+6. 换向时序：`tDDD` ≤ **2.5 µs**、`tRED` ≤ **70 ns** → 换向总延迟 ≪ 1 ms（对固件的保护间隔无苛刻要求）。
+
+**由此产生的算式（本轮独立计算）：**
+
+- 若板上是「A—4.7k—VCC ∥ B—4.7k—GND ∥ A—120Ω—B 同时接入」，则空闲差分
+  `V_AB = 5 V × 120 / (4700 + 120 + 4700) ≈ 63 mV` → **远低于接收器阈值 ±200 mV，也不满足手册要求的 ≥200 mV**；
+- 若 120Ω 实际未跨接在 A/B（只焊了偏置），则 `V_AB ≈ 2.5 V` → 满足手册要求。
+
+**⚠️ 同日二次修订（重要）：** 初版把风险写成「V_AB < VDT → AutoDirection 永不释放驱动器 → 占死总线」——**该机理不成立，现更正**。据手册 Function Tables（TRANSMITTING 表）：驱动器一旦被 DI 拉低使能，自己就会把 A-B 驱动到 VOD（≥1.5 V @54Ω）> VDT（max 1 V）→ 立即 `Turn driver OFF`；此后 `DI=1 且 A-B ≤ VDT 且驱动原为 OFF → keep it OFF`。**驱动器一定会释放，不会卡死。**
+
+**真正成立的机理**（同为手册依据，见 "Pullup and Pulldown Resistors" 一节与发送功能表）：
+
+1. 手册明确：偏置电阻的作用是**在 DI 为高期间、驱动器短暂关断之后，把总线维持在 A-B > 200 mV**（原文 "allows the external pullup/pulldown resistors to hold the bus in the high state (A-B > 200mV)"），并要求 "guarantee that the idle voltage on the bus (A-B) is greater than 200mV"。
+2. 上表 63 mV 的组合**不满足**该要求 → MAX13487 的「1」位只剩 ~63 mV，且该网络时间常数仅 ns 级（(9.4k ∥ 120Ω) × C_bus），1.04 ms 位宽内会迅速塌到 63 mV → 远端（QI 表 / USB 转 485）可能把「1」读成低或不定 → **数据错乱、CRC 全败**。
+3. 空闲期 A-B = 63 mV 落在接收器 ±200 mV 判定窗口的**中间不定区** → RO（RXO）输出不定，ESP32 侧可能收到毛刺/伪起始位。
+
+**结论：63 mV 组合仍是高危，但症状是「收不到正确数据 / CRC 全败 / 偶发乱字节」，不是「驱动器锁死」。** 另注：若实物是 `MAX485` / `MAX3485`（页面渲染图丝印即如此），DE 有效期间驱动器**全程主动驱动**、「1」位不依赖偏置，该组合只剩「空闲电平不定」一项风险 → 再次说明 H-1 丝印复核是前置条件。
+
+**判定：需实测（10 秒万用表法，断电 + 上电两步）**
+
+| 步骤 | 操作 | 预期 / 判据 |
+| --- | --- | --- |
+| ① 断电量电阻 | A–B；A–VCC；B–GND；EN–VCC；EN–GND | A–B≈120Ω ⇒ 终端在板；A–VCC 与 B–GND ≈4.7k ⇒ 偏置在板；EN 若对 VCC 有几十 k 上拉 ⇒ 悬空可被拉高 |
+| ② 上电 5V（只接 VCC/GND，EN 悬空）量 `V_A − V_B` | 直流档 | **≥200 mV ⇒ 符合手册要求**（≈2.5 V 更好）；**≈60 mV ⇒ 不满足**（症状：CRC 全败 / 乱字节 / 偶发丢帧）；≈0 V ⇒ 无偏置 |
+| ③ 上电时量 EN 对 GND 电压 | 直流档（注意 DMM 10 MΩ 输入会“读高”，读数≈5V 只说明“未被下拉”） | ≈0 V ⇒ 有强下拉或被接 GND ⇒ 必须改接固定高电平 |
+
+**症状 → 病因对照（供 M4 排障直接用）**
+
+| 现象 | 优先怀疑 |
+| --- | --- |
+| `RX=0`，模块/总线发热、电脑从站收不到请求 | EN/SHDN 被拉低（器件关断）；A/B 反接；从站未应答；USB 转 485 模块损坏 |
+| `RX 帧 == TX 帧`（回显） | 接收器被常开（`RE=0` 接法）导致自发自收（固件已在帧长异常分支给出该诊断） |
+| 收到数据但 CRC 失败 / 偶发乱字节 | **空闲差分 ≈60 mV（偏置不足，见上）**；RXO 未分压/分压不当；未共地；终端数量过多；波特率不一致 |
+| `RX=0` 但总线波形正常 | 从站侧问题；地址/波特率不符 |
+
+> ⚠️ 本项**不改变现有接线纪律**（M4 前仍须先读丝印、先实测 RXO 空闲电平），但**新增一条 M4 前置检查**：上电后先量 `V_A − V_B` 空闲差分。若 ≈60 mV，**先停手报总控裁定**（候选处置：台架短距 9600 下断开板上 120Ω 终端后复测 → 空闲差分升到 ≈2.5 V；或把 4.7kΩ 偏置换强到 ~680Ω；或换模块），不要反复烧录排障。
+
+### 11.4 新发现（文档错误 · P1）：`Serial1.flush()` 的语义注释写反了
+
+- 现有注释（`config.h` L62、`esp32c3_gateway.ino` L453-455）称“**ESP32 的 flush() 只保证 TX FIFO 排空，不保证移位寄存器已把最后一位送完**”。
+- core 源码实证（`cores/esp32/esp32-hal-uart.c` L1470-1486）：
+  `uartFlush()` → `uartFlushTxOnly(uart, true)` → `while (!uart_ll_is_tx_idle(UART_LL_GET_HW(uart->num)));`
+  → **`flush()` 会一直等到 TX 完全空闲（FIFO 排空 + 移位寄存器发完）**，注释的技术理由不成立。
+- 影响：仅为注释错误（不影响行为）。`RS485_TX_GUARD_MS = 2` **仍建议保留**，但理由应改为
+  ① 真实总线上给 AutoDirection 状态机留换向余量（手册 tDDD+tRED ≤ ~2.6 µs，2 ms 是 700 倍余量，纯防御性）；
+  ② 对 MAX485/MAX3485 变体的 DE 切换同样需要——而**不能**再写“flush 不等移位寄存器”。
+- 附带（低优先）：`uartFlushTxOnly` 的忙等**无超时上限**，UART 硬件异常时会死等；9600 下实际有界（8 字节≈8.3 ms），暂不改代码，登记备查。
+
+### 11.5 固件候选问题清单（本轮通读 619 行 + config.h 107 行）
+
+| 级 | 位置 | 问题 | 建议 |
+| --- | --- | --- | --- |
+| P1 | `config.h` L62-66 / `.ino` L451-455 | flush 注释理由不成立（见 §11.4） | **本轮已改注释**：理由改为“换向防御性余量”，并注明本 core 的 flush 语义（`uart_ll_is_tx_idle`） |
+| P1 | `config.h` L71 | R-15（**假设，待实测证伪**）：`RS485_CHAR_TIMEOUT_MS` 仍 4 ms。若电脑端 USB 转 485 从站出现 >4 ms 字节间隙，会被第 2 级超时判成“半帧”，症状为间歇 `[M4] 超时`，易误判成模块坏。**注：合规从站通常一次性 write，byte 间只有 ~1.04 ms，未必会触发；此项是首选排查假设而非已证事实。** | **本轮仅加注释（未改数值）**：A/B 对照法验证——先把本值临时放到 20~30 ms 复测；若放大后仍超时，则不是本因，改查接线/引脚/模块；M5 接真机后收紧到 4~8 ms |
+| P1 | `config.h` L60-62 | R-13 无 Plan B：`RS485_RX_PIN` 写死 20，GPIO20 可能已被 5V 打伤 | **本轮已加注释**：登记“先做回环自检（`RS485_MODE_LOOPBACK_SELFTEST=1` + 短接 21↔20）→ 失败则改用 GPIO3/4/5/10”的排障顺序；**未加 `RS485_RX_PIN_ALT` 宏**（固件无运行期换脚能力，加宏即死代码），换脚须改本行 + 文档 |
+| P2 | `config.h` L65 | 4 ms ≈ 3.84 字符时间，紧贴 Modbus t3.5（3.65 ms）边界，**无余量** | 真机（纯硬件 UART）时也建议 6~8 ms |
+| P2 | `.ino` L450 / L266 | `Serial1.write()` 与 `g_udp.write()` 返回值未检查（`write` 失败会静默少发） | 加返回值判断 + 计数告警 |
+| P2 | `.ino` L259-262 | `snprintf` 截断告警后**仍继续发**截断内容 | 截断时直接 `return`（或截断包不再上行） |
+| P2 | `.ino` L280-283 | `logRxHex()` 只打前 24 字节 → M5 的 83 字节响应**看不到尾部 CRC**，排障时会被误导 | M5 前把上限提到 96，或头部 24 + 尾部 8 分段打印 |
+| P2 | `.ino` L244-275 | **M4 的 UDP 报文只有心跳，不含 485 数据**（与产品数据流“时间戳 + HEX 数据”有差距） | 属 M5 范围，但须在任务书/M5 清单里显式登记，避免验收时被当成漏项 |
+| P3 | `config.h` L70-82 | EN 语义只写了“MAX485 方向控制 / MAX13487 接高”，**缺 `SHDN` 第三态**（模块丝印 `EN` 也可能引到 SHDN） | **本轮已补注释**：`EN=RE → 高=AutoDirection；EN=SHDN → 高=正常、低=关断；EN=DE → 高=发送（MAX485）`。三者在“MAX13487 接固定高”这一处置下**结论一致**，但诊断思路不同 |
+| P3 | `.ino` L14 / L554 | `setup()` 内有界 `delay(10)`（≤2 s 等 USB CDC 枚举），与文件头“禁止 delay()”措辞冲突 | **本轮已改**：文件头补“（唯一例外：setup() 内有界等待 USB CDC 枚举，最多 2s）”，与 L552-554 的注释口径一致 |
+| P3 | `config.h` L41-43 / `.ino` L165-166 | `wifiTick()` 的检查周期常量（5 s）与 `ntpTick()` 硬编码的 200 ms 节流风格不一致（后者未常量化） | 可读性，非缺陷 |
+
+**已核实无问题**：状态机 IDLE→TX→WAIT_RX→PARSE→SEND 的非阻塞实现；帧长驱动 + 三级超时（含 `(int32_t)` 回绕判断、首字节/字符间隔/兜底优先级）；`need` 上限保护；CRC16/Modbus（0xFFFF/0xA001/逐位，与 `06_QI协议说明.md` §1 一致）；`memcmp` 自收回显诊断；`g_payload[384]` 对 M5 最坏 255 字节余量充足；`g_nextPollMs` 落后重对齐；`getLocalTime(&now, 0)` 实测非阻塞（core 源码 `while((millis()-start)<=0)` 只跑一遍）；M3 回环模式固定帧长（不误用 byte count 推算）；异常响应（0x84）分支排在帧长判定之前。
+
+### 11.6 不确定项 / 需要用户提供的材料
+
+1. **⭐ 485 模块主芯片微距照**（或口述丝印）—— H-1 唯一阻塞项，直接决定 EN 接法。
+2. **§11.3 的三步万用表实测结果**（A–B、A–VCC、B–GND、EN–VCC/GND；上电后 `V_A − V_B`；EN 对 GND 电压）。
+3. **GPIO20 死活**：`RS485_MODE_LOOPBACK_SELFTEST=1` + 短接 GPIO21↔GPIO20 的自检结果（R-13）。
+4. **旧 USB 转 485 模块复测结果**（自环法，`02_docs/07_模拟从站记录.md` §4.1）。
+5. **新 USB 转 485 模块到货通知**（R-12 解除前提）。
+6. **RXO 空闲电平实测**（5 V → 1k/2k 分压；3.3 V → 直连）—— 未测前一律按 5 V 处理。
+7. 无法从现有材料判定的两件事（**不猜**）：模块 `EN` 究竟接到芯片 `RE`、`SHDN` 还是 `DE`；板上 `121` 是否确实跨接在 A/B（§11.3 实测可解）。
+
+> 本节为审查意见与证据记录，不修改原文；与 `04_ai_prompts/00_context.md` 冲突时以 CTX 为准。
+
+---
+
+## 12. 第 8 轮（2026-10-03 · Codex）—— 事实源纠错与明文脱敏
+
+### 12.1 偏置缺失的真实机理（纠错，已回写 CTX 三.4 / README §8-12 / 本报告 §9.5 · §10.3 F-1）
+
+- **原表述（错）**：“总线若无偏置，状态机会持续保持驱动器使能、占死总线，从站永远无法应答。”
+- **手册原文**（`05_hardware/MAX13487E_MAX13488E_Datasheet.pdf`，Detailed Description）：“When DI is high, the device drives the bus for a short time, then disables the driver and allows the external pullup/pulldown resistors to hold the bus in the high state (A-B > 200mV). During each low-to-high transition of DI, the driver stays enabled until (A-B) > VDT, and then disables the driver…”
+- **更正后的机理**：驱动器自身把 A-B 拉到 VOD（≥1.5V）> VDT（max 1V）后**每次都会自行释放**，**不存在“锁死/占死总线”**。偏置不足的真实后果：驱动器释放后“1”位塌陷到偏置电平（120Ω 跨接时约 63mV）→ 从站把“1”读错 → 数据错乱 / CRC 全败；空闲差分落入 ±200mV 不定区 → RXO 输出不定、偶发伪起始位。
+- **“占死总线”的正确适用对象**：只有 `MAX485 / MAX3485` 的 `DE` 被固定接高（单向驱动器全程主动驱动）——该处文档表述**正确，保留不动**（CTX 三.5 ②、任务书 §5.2 ②、R-06、固件 README）。
+- **功能结论不变**：偏置仍是 MAX13487E 的必需项，M3 实测偏置/终端并联数量仍是功能验收项。
+
+### 12.2 明文凭据自查（本轮新发现，已修）
+
+- `02_docs/12_全仓库审查报告_Codex.md` §11 前的 §10.1.2 曾把 **WiFi 明文密码**写进示例命令行 → `git grep -c -I` 会命中报告自身（与“0 命中”结论自相矛盾，且构成实际泄漏）。**本轮已改为占位符**，工作区复扫为 0。
+- 历史含明文提交由 3 个更正为 **4 个**：`8ef8576`、`e8612d4`、`ca21014`（`04_ai_prompts/00_context.md`）+ `aabe7d8`（本报告）。用户已决定不改写历史（策略 A），缓解措施仍为 R-04。
+
+### 12.3 其它一致性修正
+
+- `RS485_CHAR_TIMEOUT_MS` 的 M4 临时档位在 `config.h`（原写 8~30ms）与 README §8-13 / 固件 README（20~30ms）之间不一致 → 统一为 **20~30ms**。
+- §11.5 表中 `config.h` 行号 `L65` 随注释增行漂移 → 更正为 `L71`。
+- README §8-12 引用的“手册 §9.5”**不存在该章节编号**（手册只有图号 1~11）→ 改为按章节名引用。
+
+### 12.4 复验
+
+| 项 | 方法 | 结果 |
+| --- | --- | --- |
+| 编译 | `arduino-cli compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc 01_firmware/esp32c3_gateway` | 见提交前实测（注释改动，产物大小应与 997299 B 一致） |
+| 明文复扫 | `git grep -c -I "<密码>"`（工作区） | 0 命中 |
