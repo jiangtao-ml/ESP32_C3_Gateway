@@ -15,6 +15,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 脚本 | 用途 | 典型用法 |
 | --- | --- | --- |
+| **`m5_frame_check.py`** | **M5 真机帧 CRC 独立复核**（读全部 39 / 3 段 / 单寄存器探针共 7 帧）+ 响应帧长核算 | `python m5_frame_check.py` |
 | **`m4_accept.py`** | **M4 验收补测（一键跑完 3 项）**：静默 10 次后恢复 / 注入 1 位 CRC 错误 / 1000 次累计统计。同时开 ESP32 口 + 从站口，脚本化档位驱动 | `python m4_accept.py COM5 COM7 1000` |
 | **`m4_verify.py`** | **一键联测**：同时开「ESP32 串口 + 1~2 个 485 端口只读监听」，自动汇总并判定"是否在驱动总线" | `python m4_verify.py COM5 30 COM6 COM7` |
 | **`two_port_loopback.py`** | **两个 485 端口背靠背互测** —— 本项目**唯一有效**的"换件后第一动作" | `python two_port_loopback.py COM7 COM6` |
@@ -46,7 +47,8 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 文档 | 用途 |
 | --- | --- |
-| **`M4_从零重建分步指南.md`** | **现场操作卡（现行版）**：五步、每步带判据与失败处置，含正确的 `TXD`/`RXD` 交叉接线表 |
+| **`M5_真机联调操作卡.md`** | **M5 现场操作卡（现行版）**：上电前安全项、接线差异、帧清单（CRC 已独立复核）、E-02 决策树、代码改动清单、四步执行与判据、失败速查、换算速查、现场记录表 |
+| **`M4_从零重建分步指南.md`** | M4 现场操作卡：五步、每步带判据与失败处置，含正确的 `TXD`/`RXD` 交叉接线表（**M4 已通过，留作回归参考**） |
 | ⚠️ `M4_重测操作卡.md` | **已作废**（第 0 步为无效的 A/B 自环；接线表为"同名对接"，是错的）。仅留档，见文件头作废说明 |
 | `README.md` | 本索引 |
 
@@ -101,5 +103,6 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 版本 | 日期 | 作者 | 变更内容 |
 | --- | --- | --- | --- |
+| v1.2 | 2026-10-04 | WorkBuddy | 新增 **`m5_frame_check.py`**（M5 帧 CRC 独立复核，7 帧全 OK）与 **`M5_真机联调操作卡.md`**（M5 现场执行卡）；文档一览标注 M4 指南转为"回归参考"。 |
 | v1.1 | 2026-10-04 | WorkBuddy | 新增 **`m4_accept.py`**（M4 验收补测一键跑）及其五段档位表；脚本一览补注各从站脚本的行为差异 |
 | v1.0 | 2026-10-04 | WorkBuddy | 首版：脚本与文档索引、方法学红线（A/B 自环无效）、免仪表能力边界、判定口径、前置检查。 |
