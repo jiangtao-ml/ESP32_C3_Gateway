@@ -34,6 +34,7 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <time.h>
+#include <lwip/apps/sntp.h>   // sntp_getserver() / sntp_getreachability()：读取实际生效的 NTP 源（ESP32 core 自带，非第三方库）
 
 #include "config.h"
 #include "secrets.h"
@@ -197,6 +198,37 @@ static void wifiTick() {
 }
 
 // ---------------------------------------------------------------
+// NTP：打印「实际生效的源」——本次改造的核心交付
+//
+// 观察盲区：旧日志只打印配置名，无法判断 NTP 实际走内网还是落到公网。
+//
+// 所用 API（已在本 core arduino-esp32 3.3.10 中核实存在，非凭记忆）：
+//   - configTzTime() 返回 void（cores/esp32/esp32-hal-time.c），无法用返回值判成败。
+//   - sntp_getserver(idx) / sntp_getreachability(idx) 声明于
+//     .../esp32c3-libs/3.3.10-cn/include/lwip/lwip/src/include/lwip/apps/sntp.h，
+//     且符号在 liblwip.a 中有定义；sdkconfig: CONFIG_LWIP_SNTP_MAX_SERVERS=3、
+//     SNTP_SERVER_DNS=1、SNTP_MONITOR_SERVER_REACHABILITY=1。
+//   - slot 0/1/2 依次对应 NTP_SERVER_1/2/3（configTzTime 内部按序 sntp_setservername）。
+//     SNTP 逐个源尝试（先 0，超时未响应才轮到 1、2）；某源一旦回包，其 RFC5905
+//     可达性寄存器即被置为非 0 ⇒「第一个 reachability != 0 的 slot」就是实际生效源。
+//     sntp_getserver(idx) 给出该 slot 解析后的真实 IP（DNS 名打印的是解析后的 IP）。
+// 不含任何第三方库，全部为 ESP32 core 自带 lwIP / ESP-IDF API。
+// ---------------------------------------------------------------
+static void logNtpEffectiveSource() {
+  for (uint8_t i = 0; i < 3; ++i) {                 // 0=主 / 1=备1 / 2=备2
+    if (sntp_getreachability(i) == 0) continue;     // 该源未回包
+    const ip_addr_t *addr = sntp_getserver(i);
+    if (addr == NULL || ip_addr_isany(addr)) continue;
+    Serial.printf("[NTP] 实际生效源：%s（三源配置 主=%s / 备1=%s / 备2=%s）\n",
+                  ipaddr_ntoa(addr), NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+    return;
+  }
+  // 兜底：可达性寄存器尚未体现（极少数时序窗口）—— 仍打印三源配置，保证日志可读
+  Serial.printf("[NTP] 实际生效源：暂未能从 SNTP 读取（三源配置 主=%s / 备1=%s / 备2=%s）\n",
+                NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+}
+
+// ---------------------------------------------------------------
 // NTP：同步状态检测 + 状态切换日志 + 重连后重新触发
 // ---------------------------------------------------------------
 static void ntpTick() {
@@ -204,9 +236,9 @@ static void ntpTick() {
     g_ntpResyncPending = false;
     // ⚠️ 必须在 WiFi 连上之后调用：网络未就绪时 SNTP 初始化会失败，表现为永不对时
     g_lastNtpTriggerMs = millis();
-    configTzTime(NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
-    Serial.printf("[NTP] WiFi 已连上 -> 触发 SNTP 对时 TZ=%s 主=%s 备=%s\n",
-                  NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
+    configTzTime(NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+    Serial.printf("[NTP] WiFi 已连上 -> 触发 SNTP 对时 TZ=%s 主=%s 备1=%s 备2=%s\n",
+                  NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
   }
 
   if ((uint32_t)(millis() - g_lastNtpCheckMs) < 200) return;   // 节流，避免每轮都取时钟
@@ -220,7 +252,7 @@ static void ntpTick() {
   if (g_linkUp && !synced &&
       (uint32_t)(millis() - g_lastNtpTriggerMs) >= NTP_RETRY_INTERVAL_MS) {
     g_lastNtpTriggerMs = millis();
-    configTzTime(NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
+    configTzTime(NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
     Serial.printf("[NTP] 仍未同步，重试 SNTP（周期 %lu ms）\n",
                   (unsigned long)NTP_RETRY_INTERVAL_MS);
   }
@@ -231,8 +263,8 @@ static void ntpTick() {
   if (synced) {
     char ts[32];
     strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S %z", &now);  // %z 用于自检：应为 +0800，若为 +0000 即 TZ 未生效
-    Serial.printf("[NTP] 时间已同步：本地 %s（TZ=%s，源 %s / 备选 %s）\n",
-                  ts, NTP_TZ_INFO, NTP_SERVER, NTP_SERVER_IP);
+    Serial.printf("[NTP] 时间已同步：本地 %s（TZ=%s）\n", ts, NTP_TZ_INFO);
+    logNtpEffectiveSource();
   } else {
     Serial.println("[NTP] 时间同步丢失：降级为 BOOT+ 计数（数据行标记 UNSYNCED）");
   }
@@ -572,7 +604,9 @@ void setup() {
   // ---- NTP：此处【不】调用 configTzTime ----
   // 根因修复：SNTP 依赖已就绪的网络栈。若在 WiFi 连上之前初始化，SNTP 拿不到网络；
   // 现改为由 wifiTick() 在"首次连上 / 重连成功"时置位 g_ntpResyncPending，
-  // 再由 ntpTick() 调用 configTzTime（主域名 + 备选 IP 直连）。
+  // 再由 ntpTick() 调用 configTzTime（三源：主 校内 chrony -> 备1 公网域名 -> 备2 公网 IP 直连）。
+  Serial.printf("[NTP] 三源配置 TZ=%s 主=%s 备1=%s 备2=%s（等 WiFi 连上后由 ntpTick() 触发，setup 不调用 configTzTime）\n",
+                NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
 
   // ---- UDP：本地端口打开，目标由 config.h 指定 ----
   g_udp.begin(UDP_LOCAL_PORT);
