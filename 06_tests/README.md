@@ -15,6 +15,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 脚本 | 用途 | 典型用法 |
 | --- | --- | --- |
+| **`ntp_verify.py`** | **NTP 三源改造烧录验收**：抓 ESP32 启动日志，自动判定三源配置 / 时区 / 同步，并回答核心问题「实际生效源是内网 `172.16.0.2` 还是落到公网备源」 | `python ntp_verify.py COM5 45` |
 | **`ntp_probe.py`** | **NTP 可达性探针**：查某 NTP 源是否真的在应答（UDP/123）、stratum、往返延迟、与本地钟偏差。改 ESP32 的 NTP 源之前**必须先跑它** | `python ntp_probe.py 172.16.0.2 ntp.aliyun.com` |
 | **`m5_frame_check.py`** | **M5 真机帧 CRC 独立复核**（读全部 39 / 3 段 / 单寄存器探针共 7 帧）+ 响应帧长核算 | `python m5_frame_check.py` |
 | **`m4_accept.py`** | **M4 验收补测（一键跑完 3 项）**：静默 10 次后恢复 / 注入 1 位 CRC 错误 / 1000 次累计统计。同时开 ESP32 口 + 从站口，脚本化档位驱动 | `python m4_accept.py COM5 COM7 1000` |
@@ -104,6 +105,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 版本 | 日期 | 作者 | 变更内容 |
 | --- | --- | --- | --- |
+| v1.4 | 2026-10-05 | WorkBuddy | 新增 **`ntp_verify.py`**（NTP 三源改造烧录验收脚本）：抓串口自动判定三源配置 / WiFi / 同步 / 时区，并**回答核心问题「实际生效源是内网还是公网」**；含"落公网备源时应降级内网源"的结论分支。 |
 | v1.3 | 2026-10-04 | WorkBuddy | 新增 **`ntp_probe.py`**（NTP 可达性探针）。触发：导师通知内网 **172.16.0.2 有 chrony 服务**，实测该源可用（stratum 2 / RTT 3.4ms，公网对照 41ms）⇒ 建议将其列为 ESP32 主 NTP 源、公网降为备源（待总控/Codex 落地）。 |
 | v1.2 | 2026-10-04 | WorkBuddy | 新增 **`m5_frame_check.py`**（M5 帧 CRC 独立复核，7 帧全 OK）与 **`M5_真机联调操作卡.md`**（M5 现场执行卡）；文档一览标注 M4 指南转为"回归参考"。 |
 | v1.1 | 2026-10-04 | WorkBuddy | 新增 **`m4_accept.py`**（M4 验收补测一键跑）及其五段档位表；脚本一览补注各从站脚本的行为差异 |
