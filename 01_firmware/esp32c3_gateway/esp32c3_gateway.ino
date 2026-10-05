@@ -72,6 +72,8 @@ static bool         g_linkUp           = false;  // 当前 WiFi 是否已连上
 static bool         g_everConnected    = false;  // 是否曾经连上过（决定首次 begin 失败后的重试方式）
 static bool         g_timeSynced       = false;
 static bool         g_ntpResyncPending = false;  // 重连成功后置位，下一轮重新触发 SNTP
+static bool         g_ntpTriggeredThisSession = false;  // 本轮会话是否已发起过 SNTP 对时（「已同步」判据之一）
+static uint32_t     g_ntpStatusReprintMs      = 0;      // 同步确认后补打一次源状态的计划时刻（0 = 无需补打）
 
 static WiFiUDP g_udp;
 static char    g_payload[384];   // M5 最坏情况约 255 字节（时间戳 19 + " | " 3 + 39 寄存器 HEX 233），留足余量
@@ -117,7 +119,10 @@ static IPAddress ipFromString(const char *s) {
 // 生成时间戳：已同步 -> "YYYY-MM-DD HH:MM:SS"；未同步 -> "BOOT+<秒>.<毫秒>"
 static bool buildTimestamp(char *out, size_t outSize) {
   struct tm now;
-  if (getLocalTime(&now, 0)) {             // 0 = 不阻塞等待
+  // ⚠️ 只有本轮会话经 NTP 回包确认过（g_timeSynced）才认为时间可信：
+  //    复位后 RTC 可能带上一轮的旧时间让 getLocalTime() 为真，但那 ≠ 本次已对时。
+  //    否则按 BOOT+ 计数输出，并由调用方标记 UNSYNCED（与 ntpTick 的降级路径一致）。
+  if (g_timeSynced && getLocalTime(&now, 0)) {     // 0 = 不阻塞等待
     strftime(out, outSize, "%Y-%m-%d %H:%M:%S", &now);
     return true;
   }
@@ -198,44 +203,89 @@ static void wifiTick() {
 }
 
 // ---------------------------------------------------------------
-// NTP：打印「实际生效的源」——本次改造的核心交付
+// NTP：源状态全量打印（本次改造的核心可观察项）
 //
-// 观察盲区：旧日志只打印配置名，无法判断 NTP 实际走内网还是落到公网。
+// 观察盲区：旧实现只打印配置名，无法判断 NTP 实际走内网还是落到公网；
+//   且旧 logNtpEffectiveSource() 找到「第一个回包的 slot」就 return，一个都没命中
+//   则只剩一句兜底 —— 时序稍不对（如判定过早）就完全没有信息量。
+//   现改为：三个 slot 全量打印解析后地址 + RFC5905 reachability 移位寄存器，
+//   无论时序如何，都能一眼看出「哪个源回了包、哪个没回」。
 //
 // 所用 API（已在本 core arduino-esp32 3.3.10 中核实存在，非凭记忆）：
-//   - configTzTime() 返回 void（cores/esp32/esp32-hal-time.c），无法用返回值判成败。
 //   - sntp_getserver(idx) / sntp_getreachability(idx) 声明于
 //     .../esp32c3-libs/3.3.10-cn/include/lwip/lwip/src/include/lwip/apps/sntp.h，
-//     且符号在 liblwip.a 中有定义；sdkconfig: CONFIG_LWIP_SNTP_MAX_SERVERS=3、
+//     符号在 liblwip.a 中有定义；sdkconfig：CONFIG_LWIP_SNTP_MAX_SERVERS=3、
 //     SNTP_SERVER_DNS=1、SNTP_MONITOR_SERVER_REACHABILITY=1。
-//   - slot 0/1/2 依次对应 NTP_SERVER_1/2/3（configTzTime 内部按序 sntp_setservername）。
-//     SNTP 逐个源尝试（先 0，超时未响应才轮到 1、2）；某源一旦回包，其 RFC5905
-//     可达性寄存器即被置为非 0 ⇒「第一个 reachability != 0 的 slot」就是实际生效源。
-//     sntp_getserver(idx) 给出该 slot 解析后的真实 IP（DNS 名打印的是解析后的 IP）。
-// 不含任何第三方库，全部为 ESP32 core 自带 lwIP / ESP-IDF API。
+//   - slot 0/1/2 依次对应 NTP_SERVER_1/2/3（configTzTime 内部按序 sntp_setservername）；
+//     reachability != 0 ⇒ 该源「本轮会话确实回过包」（RFC5905 移位寄存器，复位清零）。
+//   - 备选 sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED：枚举名已核实
+//     （esp_sntp.h），但它与 lwip 版 sntp_getserver 声明冲突、且 COMPLETED 读后即复位、
+//     不是持久标志 ⇒ 改用 reachability + 自记「本轮已发起对时」标志（更稳）。
+// 不含任何第三方库，全部为 ESP32 core 自带 lwIP API。
 // ---------------------------------------------------------------
-static void logNtpEffectiveSource() {
+static const char *const kNtpCfg[3] = { NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3 };
+
+// 「已同步」的唯一判据：本轮会话确已收到 NTP 回包（任一 slot reachability != 0）。
+// ⚠️ 绝不能用 getLocalTime()：芯片不断电时 RTC 域保留上一轮的时间，软复位后
+//    getLocalTime() 立即为真，却与「本次是否刚跟 NTP 对过时」无关 ⇒ 会提前宣告同步
+//    （TZ 未生效 → %z 显示 +0000；SNTP 未回包 → 读不到实际生效源）。
+static bool ntpHasReply() {
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (sntp_getreachability(i) != 0) return true;
+  }
+  return false;
+}
+
+// 三个 slot 全量打印：slotI=<解析后IP 或 配置名> reach=0xNN
+static void logNtpSlots() {
+  char line[224];
+  size_t pos = 0;
   for (uint8_t i = 0; i < 3; ++i) {                 // 0=主 / 1=备1 / 2=备2
-    if (sntp_getreachability(i) == 0) continue;     // 该源未回包
+    char slot[80];
+    const ip_addr_t *addr = sntp_getserver(i);
+    if (addr != NULL && !ip_addr_isany(addr)) {
+      const char *ip = ipaddr_ntoa(addr);           // 静态缓冲，下面立即用掉
+      if (strcmp(ip, kNtpCfg[i]) == 0) snprintf(slot, sizeof(slot), "%s", ip);
+      else                             snprintf(slot, sizeof(slot), "%s->%s", kNtpCfg[i], ip);
+    } else {
+      snprintf(slot, sizeof(slot), "%s(未解析)", kNtpCfg[i]);
+    }
+    int n = snprintf(line + pos, sizeof(line) - pos, "%sslot%u=%s reach=0x%02X",
+                     (i == 0) ? "" : " | ", (unsigned)i, slot,
+                     (unsigned)sntp_getreachability(i));
+    if (n <= 0 || (size_t)n >= (sizeof(line) - pos)) break;
+    pos += (size_t)n;
+  }
+  Serial.printf("[NTP] 源状态：%s\n", line);
+}
+
+// 全量打印 + 指明实际生效源（在「判定为真正同步」之后调用一次）
+static void logNtpEffectiveSource() {
+  logNtpSlots();
+  for (uint8_t i = 0; i < 3; ++i) {
+    if (sntp_getreachability(i) == 0) continue;     // 该源本轮未回包
     const ip_addr_t *addr = sntp_getserver(i);
     if (addr == NULL || ip_addr_isany(addr)) continue;
-    Serial.printf("[NTP] 实际生效源：%s（三源配置 主=%s / 备1=%s / 备2=%s）\n",
-                  ipaddr_ntoa(addr), NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+    Serial.printf("[NTP] 实际生效源：%s（slot%u，配置 %s）\n",
+                  ipaddr_ntoa(addr), (unsigned)i, kNtpCfg[i]);
     return;
   }
-  // 兜底：可达性寄存器尚未体现（极少数时序窗口）—— 仍打印三源配置，保证日志可读
-  Serial.printf("[NTP] 实际生效源：暂未能从 SNTP 读取（三源配置 主=%s / 备1=%s / 备2=%s）\n",
-                NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+  // 兜底：理论上不会走到（只在同步确认后调用），保留旧措辞以便验收脚本识别
+  Serial.println("[NTP] 实际生效源：暂未能从 SNTP 读取（本次会话尚未收到 NTP 回包）");
 }
 
 // ---------------------------------------------------------------
 // NTP：同步状态检测 + 状态切换日志 + 重连后重新触发
 // ---------------------------------------------------------------
+// 同步确认后隔 N 秒补打一次源状态，便于人工确认实际生效源保持稳定（可选增强）
+static const uint32_t NTP_STATUS_REPRINT_DELAY_MS = 30000;
+
 static void ntpTick() {
   if (g_ntpResyncPending) {
     g_ntpResyncPending = false;
     // ⚠️ 必须在 WiFi 连上之后调用：网络未就绪时 SNTP 初始化会失败，表现为永不对时
-    g_lastNtpTriggerMs = millis();
+    g_lastNtpTriggerMs        = millis();
+    g_ntpTriggeredThisSession = true;
     configTzTime(NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
     Serial.printf("[NTP] WiFi 已连上 -> 触发 SNTP 对时 TZ=%s 主=%s 备1=%s 备2=%s\n",
                   NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
@@ -244,28 +294,41 @@ static void ntpTick() {
   if ((uint32_t)(millis() - g_lastNtpCheckMs) < 200) return;   // 节流，避免每轮都取时钟
   g_lastNtpCheckMs = millis();
 
-  struct tm now;
-  bool synced = getLocalTime(&now, 0);
+  // 「已同步」= 本轮已发起对时 且 确已收到 NTP 回包（reachability != 0）。
+  // 不再用 getLocalTime()：复位后 RTC 旧时间会把它骗成 true（见上方根因注释）。
+  bool ntpConfirmed = g_ntpTriggeredThisSession && ntpHasReply();
 
   // 未同步：按 NTP_RETRY_INTERVAL_MS 周期重新触发 SNTP（任务书 §6.1.2 要求 60s 重试）
-  // 前提：WiFi 已连上（否则会重现“网络未就绪就初始化 SNTP”的故障）
-  if (g_linkUp && !synced &&
+  // 判据同为 NTP 回包 ⇒ 复位后即使 RTC 有旧时间，也会持续重试，而不是假装已同步。
+  if (g_linkUp && !ntpConfirmed &&
       (uint32_t)(millis() - g_lastNtpTriggerMs) >= NTP_RETRY_INTERVAL_MS) {
     g_lastNtpTriggerMs = millis();
     configTzTime(NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
-    Serial.printf("[NTP] 仍未同步，重试 SNTP（周期 %lu ms）\n",
+    Serial.printf("[NTP] 仍未同步（本轮未收到 NTP 回包），重试 SNTP（周期 %lu ms）\n",
                   (unsigned long)NTP_RETRY_INTERVAL_MS);
   }
 
-  if (synced == g_timeSynced) return;
+  // 同步后补打一次源状态（可选增强，便于人工复查实际生效源）
+  if (g_ntpStatusReprintMs != 0 && (int32_t)(millis() - g_ntpStatusReprintMs) >= 0) {
+    g_ntpStatusReprintMs = 0;
+    Serial.println("[NTP] 源状态（同步后复查）");
+    logNtpSlots();
+  }
 
-  g_timeSynced = synced;
-  if (synced) {
+  if (ntpConfirmed == g_timeSynced) return;
+
+  if (ntpConfirmed) {
+    struct tm now;
+    if (!getLocalTime(&now, 0)) return;   // 系统时钟尚未就绪：下轮再宣告，避免打印误报
     char ts[32];
-    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S %z", &now);  // %z 用于自检：应为 +0800，若为 +0000 即 TZ 未生效
+    strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S %z", &now);  // %z 自检：应为 +0800
+    g_timeSynced = true;
     Serial.printf("[NTP] 时间已同步：本地 %s（TZ=%s）\n", ts, NTP_TZ_INFO);
     logNtpEffectiveSource();
+    g_ntpStatusReprintMs = millis() + NTP_STATUS_REPRINT_DELAY_MS;
   } else {
+    g_timeSynced         = false;
+    g_ntpStatusReprintMs = 0;
     Serial.println("[NTP] 时间同步丢失：降级为 BOOT+ 计数（数据行标记 UNSYNCED）");
   }
 }
