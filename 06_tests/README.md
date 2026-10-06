@@ -20,6 +20,8 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 | **`ntp_probe.py`** | **NTP 可达性探针**：查某 NTP 源是否真的在应答（UDP/123）、stratum、往返延迟、与本地钟偏差。改 ESP32 的 NTP 源之前**必须先跑它** | `python ntp_probe.py 172.16.0.2 ntp.aliyun.com` |
 | **`m5_frame_check.py`** | **M5 真机帧 CRC 独立复核**（读全部 39 / 3 段 / 单寄存器探针共 7 帧）+ 响应帧长核算 | `python m5_frame_check.py` |
 | **`m5_slave_04.py`** | **M5 台面预演从站**：电脑端应答 **`0x04`** 真机帧（39 个**合成**寄存器，3 段 / 一帧读全皆可）；`--limit16` 复现 E-02 的 `0x84/0x02` 拒绝分支。**用途 = 接真机前把「代码问题」与「真机问题」分开**（见操作卡 §0b） | `python m5_slave_04.py COM7`（默认）或 `… COM7 --limit16` |
+| **`db_proto.py`** | **数据落库原型**：解析 → **四层校验 L0~L3** → 质量打标 → **幂等入库（SQLite）**。字典驱动（读 `05_hardware/STB3-125_字段字典.csv`，**不硬编码字段**）；保留 `raw_hex`；`PRIMARY KEY(device_id, collect_time)` 保证补传幂等；把「型号已知不上报字段」（A/B/C_temp）与「本次异常」分开，否则每行都会降级成 PARTIAL。**不依赖真机** | `python db_proto.py --demo`<br>`python db_proto.py --log <udp_listen 抓包>`<br>`python db_proto.py --ddl` |
+| **`db_schema.sql`** | 由 `db_proto.py --ddl` 依字段字典生成的**建表 DDL**（11 个元数据列 + 39 个测量列 + 唯一键） | — |
 | **`m4_accept.py`** | **M4 验收补测（一键跑完 3 项）**：静默 10 次后恢复 / 注入 1 位 CRC 错误 / 1000 次累计统计。同时开 ESP32 口 + 从站口，脚本化档位驱动 | `python m4_accept.py COM5 COM7 1000` |
 | **`m4_verify.py`** | **一键联测**：同时开「ESP32 串口 + 1~2 个 485 端口只读监听」，自动汇总并判定"是否在驱动总线" | `python m4_verify.py COM5 30 COM6 COM7` |
 | **`two_port_loopback.py`** | **两个 485 端口背靠背互测** —— 本项目**唯一有效**的"换件后第一动作" | `python two_port_loopback.py COM7 COM6` |
@@ -107,6 +109,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 版本 | 日期 | 作者 | 变更内容 |
 | --- | --- | --- | --- |
+| v1.8 | 2026-10-06 | WorkBuddy | ① 新增 **`db_proto.py`**（数据落库原型：解析 → 四层校验 → 打标 → 幂等入库；字典驱动、保留 raw_hex；**把"型号已知不上报字段"与"本次异常"分开**）与 **`db_schema.sql`**（生成的建表 DDL）；② 配套新增字段字典 **`05_hardware/STB3-125_字段字典.csv`**（39 行，**唯一事实来源**，`m5_parse.py` 与 `db_proto.py` 共用其口径）。实测：真机抓包 59 条全部入库且 `quality=OK`；同数据二次入库 **7→7 新增 0 行**（幂等成立）。 |
 | v1.7 | 2026-10-05 | WorkBuddy | §2 的 M5 操作卡条目补 **§0c**（无 USB 转 485 / 无串口时的现场单）。触发：现场实际为「有充电宝、无 USB 转 485、真机 A/B 已接且带电」⇒ 台面预演跳过，运行期改为只看 UDP。 |
 | v1.6 | 2026-10-05 | WorkBuddy | 新增 **`m5_slave_04.py`**（M5 台面预演从站：电脑端应答 `0x04` 真机帧，39 个合成寄存器，`--limit16` 复现 E-02 拒绝分支）；§2 的 M5 操作卡条目补 §0b。触发：M5 首次烧录要同时改三处固件，直接接真机首跑会把「代码问题」与「真机问题」混在一起 ⇒ 先用电脑把 `0x04` 全链路跑通再去碰真机。 |
 | v1.5 | 2026-10-05 | WorkBuddy | ① 新增 **`udp_listen.py`**（PC 侧 UDP 接收监听 —— 验证数据"真的到了电脑"，因为串口报成功 ≠ 送达）；② **`ntp_verify.py` 增强**：新增「同步行是否早于『触发 SNTP 对时』行」的**判定过早自动识别**、**走兜底分支识别**、以及"时区看起来是 +0000 但实际时间正确"的澄清提示；③ 新增**串口掉线自动重连**（ESP32-C3 原生 USB CDC 在芯片复位时必然重新枚举）。 |
