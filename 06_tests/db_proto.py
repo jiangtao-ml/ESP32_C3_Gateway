@@ -123,8 +123,12 @@ def raw_to_value(f, regs):
         return v, True, "= 量程下限，疑似『无数据』伪装（该相未装接线柱温度传感器）"
     lo, hi = f["raw_min"], f["raw_max"]
     if lo is not None and hi is not None:
-        # 温度类字段量程是换算后的；其余按换算后比
-        lo_c, hi_c = (lo - 40, hi - 40) if "raw-40" in conv else (lo, hi)
+        # ⚠️ 字段字典的 raw_min/raw_max 列虽然叫 "raw"，实际存的是【换算后工程量范围】：
+        #   见 05_hardware/STB3-125_字段字典.csv —— temp 列 = -40..160（℃）、frequency = 0..100（Hz）。
+        #   故此处一律直接按换算后的值比较，**不得再对 raw-40 字段二次减 40**。
+        #   旧代码 (lo-40, hi-40) 把温度算成 -80..120 ℃，与固件（-40..160）矛盾，
+        #   已于 2026-10-06 修正（闭合 PROGRESS.md §8.1 第 3 条）。
+        lo_c, hi_c = lo, hi
         if v < lo_c or v > hi_c:
             return v, True, "越界（量程 %s~%s %s）" % (lo_c, hi_c, f["unit"])
     return v, False, None
