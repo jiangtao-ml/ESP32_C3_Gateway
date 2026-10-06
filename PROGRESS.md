@@ -60,6 +60,54 @@ ESP32-C3 SuperMini（HW-466AB）+ MAX13487 模块 **替换树莓派网关**（50
 | 操作卡 | `06_tests/M5_真机联调操作卡.md`（v1.5，含 §0b 台面预演 / §0c 无串口现场单） |
 | 证据 | `03_logs/M5真机首测_20261005_2035.log`（真机 59 包）、`03_logs/老师固件_*`（逆向产物） |
 
+## 5b. 工具链：编译 / 烧录走哪条链（**别搞错**）
+
+| 用途 | 用哪条链 | 说明 |
+| --- | --- | --- |
+| **编译 + 烧录（正式）** | **Arduino 工具链** —— `arduino-cli`（Arduino IDE 2.3.10 自带） | 在 Arduino IDE 图形界面点"上传"等效 |
+| **只编译、不烧录** | **PlatformIO**（`01_firmware/pio_verify/`） | 只是"平行对照组"，**不参与烧录** |
+
+**`arduino-cli` 路径**
+`F:\Users\17352\AppData\Local\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe`
+
+```
+compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc 01_firmware/esp32c3_gateway
+# 烧录：同一条命令末尾加  --upload -p COM5
+```
+
+- **`CDCOnBoot=cdc` 不能漏** —— 即 Tools 里的 "USB CDC On Boot = Enabled"；漏了 `Serial` 会去占 GPIO20/21，与 UART1 打架。
+- 用的是 **arduino-esp32 3.3.10-cn**（在 `Arduino15`）+ `esp-rv32` 工具链。
+- 烧前**关掉 Arduino IDE 的串口监视器**（进程 `serial-monitor` 占着 COM 口，否则报 `PermissionError(13)`）。
+
+### 🔴 为什么 PlatformIO 现在**不能**烧
+
+它用 `espressif32@7.1.3` → **arduino-esp32 2.0.17**，而板子在跑 **3.3.10** ⇒ 实测**产物不等价**
+（Flash −23.4%、RAM +4.7%）。**拿它烧 = 给板子换 core，而新 core 的运行行为一次都没验过。**
+⇒ 详见 `02_docs/16` §9.5.4。
+
+### 🔴 烧录时的两条硬规矩
+
+1. **真机带电 ⇒ ESP32 的 USB 必须拔掉**（要烧录就先给真机断电，或把 A/B 从面包板拔掉 —— **拔面包板侧不用碰配电箱**）。
+2. 烧完**拔 USB**、改**充电宝**供电，再合闸跑数据。
+
+### 迁 PlatformIO 的时机与门槛
+
+项目已登记的决策：导师要求组内迁 **VSCode + PlatformIO + Claude Code**，裁定「**推迟到 M5 真机数据稳定之后、M6 压测之前**」。
+
+**建议门槛（三条都满足才迁）：**
+
+| # | 门槛 |
+| --- | --- |
+| ① | 功能对齐**批次 1、2 完成**且**真机验证通过** |
+| ② | 有一次 **≥10 分钟**真机连续采样、成功率 **≥97%** |
+| ③ | **先决定 core**：跟 PlatformIO 默认（2.0.17，与老师一致）还是显式钉 3.x ⇒ **这决定要不要重验全部行为** |
+
+⇒ **迁移后必须重跑**：一次台面（合成数据）+ 一次真机。
+⇒ ⚠️ **现在别迁**：会把"功能对齐"和"换 core"两个变量混在一起，出问题分不清是谁引起的。
+⇒ 📌 **别为了迁移而迁移**：`arduino-cli` 已经能满足"命令行 + 可复现 + 能烧"；迁 PlatformIO 的主要理由是**导师要求的组内工具链统一**。
+
+---
+
 ## 6. 协作纪律（**都是踩过的坑**）
 
 1. **提交只 add 自己的文件** —— 多智能体在同一仓库工作，`git add -A` 会**吞掉别人的在途改动**（2026-10-04 已实际踩到）。
