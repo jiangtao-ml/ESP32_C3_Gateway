@@ -10,5 +10,14 @@
  * 因为 .ino 由 Arduino 预处理器自动生成原型，.cpp 不会）。
  *
  * 事实来源：02_docs/16_数据落地与商业化设计.md §9.5
+ *
+ * ⚠️ 2026-10-07（砚青）：下面的 `#include <WiFi.h>` **不是冗余**——
+ *    LDF 的 deep 模式不会跟进 src/ 之外的 .ino 文件扫描库依赖
+ *    （依赖图为空 ⇒ 库源码不编译、头文件路径不下发）；
+ *    而 deep+ 能跟进、却触发上游 bug（espressif/arduino-esp32#9782，
+ *    WiFi 报 Network.h 找不到）。⇒ 在 main.cpp 显式列出 .ino 用到的库头，
+ *    让 LDF 从本文件即可发现 WiFi ⇒ 递归发现 Network。与 .ino 重复包含无害
+ *    （头文件均有 include guard）。
  */
+#include <WiFi.h>   // LDF 锚点：让 PlatformIO 发现 WiFi 库（进而递归发现 Network）
 #include "../../esp32c3_gateway/esp32c3_gateway.ino"

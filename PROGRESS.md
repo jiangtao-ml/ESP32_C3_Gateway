@@ -3,7 +3,7 @@
 > **这是什么**：一页纸的「现在在哪、接下来做什么」。**任何 AI 智能体 / 协作者进入本仓库，请先读这个文件。**
 > **详细计划**：`02_docs/16_数据落地与商业化设计.md` §9（推进计划）/ §10（功能对齐清单）
 > **唯一事实来源**：`04_ai_prompts/00_context.md` —— **与本文件冲突时以它为准**。
-> 维护：WorkBuddy ｜ 最后更新：**2026-10-06**（砚青接手校准：D1/D2/D3 决策入档、温度口径闭环、PlatformIO 定性为硬约束）
+> 维护：WorkBuddy ｜ 最后更新：**2026-10-07**（PlatformIO 3.x 迁移**编译打通**：pioarduino 55.03.311 首编 SUCCESS，见 §5b 落地注记）
 > **文档铁律已于 2026-10-06 改版 → 见 §2b**（旧版"某些文件绝对不许改"已废除）。
 
 ---
@@ -18,7 +18,8 @@
 | --- | --- |
 | ✅ 已完成 | **M0–M5 全部通过**。M5 真机联调 2026-10-05 实测：功能码 `0x04` + 3 段读取，**59/60**、每包 **78 字节 = 39 寄存器** |
 | 🚧 正在做 | **功能对齐 批次 1**：**代码已完成 + 独立复核通过**（`1004899` / `39284`，0 error / 0 warning）⇒ **⏳ 只差真机跑一次**（**未 commit**，改动在 `config.h` 与 `esp32c3_gateway.ino`） |
-| ⬜ 接着做 | 批次 2（一帧读全 + 失败降级 3 段，顺带答 E-02）→ 批次 3（AP + Web 配置页 + `/status` + NVS）→ **M6 压测**（前置：先定 PlatformIO core）→ M7 验收 |
+| ⬜ 接着做 | 批次 2（一帧读全 + 失败降级 3 段，顺带答 E-02）→ 批次 3（AP + Web 配置页 + `/status` + NVS）→ **M6 压测**（前置 ~~先定 PlatformIO core~~ ⇒ **core 已定 3.x 且 2026-10-07 编译打通**，M6 前只剩"迁移后对照验证"）→ M7 验收 |
+| ✅ 新进展 | **PlatformIO 3.x 迁移编译打通（2026-10-07）**：`pioarduino@55.03.311`（Arduino 3.3.11/IDF 5.5.5）首编 SUCCESS，RAM +100 B / Flash +1.5% vs Arduino 基线 ⇒ 详见 `02_docs/20` §8 |
 | ✅ 交付补齐 | `02_docs/08_M5真机联调记录.md` **已写**（2026-10-06，砚青）—— 原"唯一欠交付"已闭环 |
 
 **必读顺序**：① 本文件 → ② `04_ai_prompts/00_context.md`（背景与口径，**唯一事实来源**）→ ③ `02_docs/16` §9 / §10（推进计划与功能对齐分批）→ ④ 动代码前读 `01_firmware/esp32c3_gateway/README.md`（工程内说明）。
@@ -158,6 +159,8 @@ compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc 01_firmware/esp32c3_gateway
 > 🔧【2026-10-06 校准 · 砚青】导师已明确**组内必须用 PlatformIO**（不是可选偏好）⇒ 迁移是**硬交付约束，必须做**。
 > 因此**撤回**此前"把 M6 与 PlatformIO 解绑、M6 先用 arduino-cli 跑"的提法：**M6 是结项前的最终稳定性验证，其产物应当来自最终交付链** —— 在迁移之前跑，等于验一个随后会被替换掉的二进制。
 > **正确动作 = 先打通迁移**。真阻塞只有两个：① **core 选择**（`2.0.17` 跟老师一致 vs 钉 `3.x` 少改行为）② **国内下载 / 离线安装**（⭐ 最快：老师打包 `.platformio` 的 `platforms/` + `packages/` 拷过来，0 下载）。**问题不是"要不要迁"。**
+>
+> ✅【2026-10-07 落地 · 砚青】**两个阻塞均已打通**：core 钉 **3.x**（`pioarduino@55.03.311` = Arduino 3.3.11/IDF 5.5.5，pioarduino 跳过 3.3.10 故取最近邻）；国内安装走 `06_tests/pio_cn_seed.py` v2.0（双通道规则 A/B）。**首次真实编译 `[SUCCESS]`**（RAM 39 384 B = 基线 +100 B；Flash 1 019 703 B = 基线 +1.5%；日志 `03_logs/pio3_m.log`）。`pio_verify` 仍**只编译不烧录**。6 个环境坑与复机 playbook 见 `02_docs/20` §8.4。**剩余前置 = 迁移后对照验证**（台面 + 真机各一次，`02_docs/19` §3.2）。
 
 ---
 
@@ -218,5 +221,6 @@ compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc 01_firmware/esp32c3_gateway
 | 11 | **D3（用户裁定）**：**撤回**"解绑 M6 与 PlatformIO"提法 —— 导师要求组内用 PlatformIO，属硬交付约束 ⇒ 先打通迁移，再跑 M6 | 本文件 §5b |
 | 12 | **新增 `02_docs/19`（PlatformIO core 选型决策备忘）**：建议钉 `3.x`（非 `2.0.17`），含 API 实测审计 + 官方支持/安全事实 + 自持措施 | `02_docs/19_...md`；本文件 §8.1-4 |
 | 13 | **新增 `02_docs/20`（工具链国内镜像与离线安装）**：确认 `-cn` = Espressif 官方 CN 镜像渠道标记；归纳镜像通道**规则 A/B**；给出 PlatformIO 3.x 迁移的**完整包清单 + 逐包实测通道**（`github.com` 本机实测超时 = 根因） | `02_docs/20_...md`；`02_docs/11` C-02 闭环（v1.3） |
+| 14 | **PlatformIO 3.x 迁移编译打通（2026-10-07）**：`pio_cn_seed.py` v2.0（平台驱动 + 桩包解析 + 双通道）；平台切到 `pioarduino@55.03.311`（Arduino 3.3.11/IDF 5.5.5）；**首编 SUCCESS**（RAM +100 B / Flash +1.5% vs Arduino 基线）；`platformio.ini` 改 `lib_ldf_mode = deep`（禁 `+`，issue #9782）+ `main.cpp` 加 WiFi 锚点；6 个环境坑 playbook 入档 | `06_tests/pio_cn_seed.py`；`01_firmware/pio_verify/{platformio.ini,src/main.cpp}`；`02_docs/20` §8（v1.1）；本文件 §5b |
 
 > **原 §8 已闭环（2026-10-06）**：① 任务书进度字段过期 → ✅ 已同步（v0.4.0）；② 角色口径两处旧表述（`00_context.md` 一、任务书 §3）→ ✅ 已同步。
