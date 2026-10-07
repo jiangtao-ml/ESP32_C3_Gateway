@@ -2,7 +2,7 @@
  * esp32c3_gateway.ino
  * ESP32-C3 RS-485 采集网关（替换树莓派网关项目）
  *
- * 当前里程碑：M5 —— QI 真机协议：功能码 0x04 读输入寄存器 + 39 寄存器 3 段读取
+ * 当前里程碑：M5 + 批次2 —— QI 真机协议：功能码 0x04 读输入寄存器 + 39 寄存器（一帧读全 / 3 段运行时自适应）
  *
  * 已实现：WiFi 连接与最小自恢复、SNTP 对时（含 UNSYNCED 降级）、每秒 1 轮 UDP 上行、
  *        每秒 1 轮 Modbus RTU 请求/响应（一轮 = S1->S2->S3 三个子回合，同一秒内依次跑完）：
@@ -10,6 +10,9 @@
  *        【批次 1】上行改为手写 snprintf 组装的 JSON：每轮 1 行心跳 +（三段全成功时）1 行数据；
  *        数据行含 raw（78 字节 HEX，硬约束 12）与 quality / invalid；设备命名 dev = "ESP485-" + MAC 后 6 位；
  *        累计计数器 poll_ok / poll_err / udp_tx（+ seq / rssi / free_heap）
+ *        【批次 2】运行时自适应读取：启动先发一帧读全（01 04 00 00 00 27 B0 10，期望 83 字节），
+ *        从未成功且连续 QI_FULLFRAME_FALLBACK_AFTER 轮失败则本会话降级为 3 段（S1/S2/S3，37/37/19）；
+ *        曾经成功过则永不降级；心跳行新增 mode 字段（"full"/"3seg"）供远程观察当前模式。
  * 未实现：M6 起的状态机加固与断线补传 —— 留待后续；本文件只做读操作，绝不含写/合闸/分闸帧
  *        （M4 的 0x03 回环帧仅保留给 RS485_MODE_LOOPBACK_SELFTEST=1 的串口层自检）
  *
@@ -104,17 +107,22 @@ static const uint8_t MODBUS_TX_LEN             = MODBUS_TEST_FRAME_LEN;
 static uint8_t g_txLen = MODBUS_TX_LEN;
 
 // 帧长驱动的兜底初值（真正判长仍按 byte count 动态算，见 ST_WAIT_RX / parseResponse，P4）：
-//   回环模式 = 请求帧长（发 8 收 8）；总线 3 段模式 = 当前段期望长（每段在 ST_TX 设定）；
-//   总线一帧读全模式 = QI_FULL_RESP_LEN(83) 初值
+//   回环模式 = 请求帧长（发 8 收 8）；总线模式 = 当前段期望长（每段在 ST_TX 按 g_readMode 设定）。
+//   批次 2 起启动默认一帧读全 => 初值 = QI_FULL_RESP_LEN(83)。
 #if RS485_MODE_LOOPBACK_SELFTEST
 static uint8_t g_expectRxLen = MODBUS_TX_LEN;
 #else
-#if QI_READ_SPLIT_3SEG
-static uint8_t g_expectRxLen = QI_SEG1_RESP_LEN;
-#else
 static uint8_t g_expectRxLen = QI_FULL_RESP_LEN;
 #endif
-#endif
+
+// ---- 批次 2：运行时读取模式（一帧读全 <-> 3 段）+ 失败自动降级状态 ---------------
+//   g_readMode：0 = 一帧读全（启动默认）/ 1 = 3 段读取（降级后本会话不再回切）。
+//   g_fullConsecFail：一帧模式下连续失败轮数（每轮结束时判定一次）。
+//   g_fullEverOk：一帧模式本会话是否曾经成功（成功过则永不降级）。
+//   放在回环守卫之外：回环模式也要编译（心跳行引用），但恒为默认 0。
+static uint8_t g_readMode       = 0;
+static uint8_t g_fullConsecFail = 0;
+static bool    g_fullEverOk     = false;
 
 static_assert(sizeof(MODBUS_TEST_FRAME_BYTES) == (size_t)MODBUS_TEST_FRAME_LEN,
               "MODBUS_TEST_FRAME_LEN 与 MODBUS_TEST_FRAME 字节数不一致");
@@ -136,17 +144,32 @@ static_assert(sizeof(QI_SEG3_FRAME_BYTES) == (size_t)QI_SEG_FRAME_LEN,
 static_assert(sizeof(QI_FULL_FRAME_BYTES) == (size_t)QI_SEG_FRAME_LEN,
               "QI_FULL_FRAME 字节数 != QI_SEG_FRAME_LEN");
 
-#if QI_READ_SPLIT_3SEG
-static const uint8_t  QI_SEG_COUNT           = 3;
-static const uint8_t *const QI_SEG_FRAMES[3] = { QI_SEG1_FRAME_BYTES, QI_SEG2_FRAME_BYTES, QI_SEG3_FRAME_BYTES };
-static const uint8_t  QI_SEG_RESP_LENS[3]    = { QI_SEG1_RESP_LEN, QI_SEG2_RESP_LEN, QI_SEG3_RESP_LEN };
-static const uint16_t QI_SEG_MERGE_OFF[3]    = { 0, 32, 64 };   // C7：S1->0 / S2->32 / S3->64
-#else
-static const uint8_t  QI_SEG_COUNT           = 1;
-static const uint8_t *const QI_SEG_FRAMES[1] = { QI_FULL_FRAME_BYTES };
-static const uint8_t  QI_SEG_RESP_LENS[1]    = { QI_FULL_RESP_LEN };
-static const uint16_t QI_SEG_MERGE_OFF[1]    = { 0 };           // FULL 模式：数据域起点即 0
-#endif
+// 批次 2：两组常量表都编译（不再有编译期二选一），运行时按 g_readMode 选择。
+//   一帧读全组：1 段、off=0、byteCount=78（落进 g_merged 的结果与 3 段拼接逐字节一致）。
+//   3 段组：S1/S2/S3、off=0/32/64、期望 37/37/19。
+static const uint8_t  QI_FULL_SEG_COUNT           = 1;
+static const uint8_t *const QI_FULL_SEG_FRAMES[1] = { QI_FULL_FRAME_BYTES };
+static const uint8_t  QI_FULL_SEG_RESP_LENS[1]    = { QI_FULL_RESP_LEN };
+static const uint16_t QI_FULL_SEG_MERGE_OFF[1]    = { 0 };
+
+static const uint8_t  QI_3SEG_COUNT           = 3;
+static const uint8_t *const QI_3SEG_FRAMES[3] = { QI_SEG1_FRAME_BYTES, QI_SEG2_FRAME_BYTES, QI_SEG3_FRAME_BYTES };
+static const uint8_t  QI_3SEG_RESP_LENS[3]    = { QI_SEG1_RESP_LEN, QI_SEG2_RESP_LEN, QI_SEG3_RESP_LEN };
+static const uint16_t QI_3SEG_MERGE_OFF[3]    = { 0, 32, 64 };   // C7：S1->0 / S2->32 / S3->64
+
+// 按 g_readMode 取当前生效表（返回 const 指针，静态分配，非阻塞）
+static inline uint8_t qiActiveSegCount() {
+  return (g_readMode == 0) ? QI_FULL_SEG_COUNT : QI_3SEG_COUNT;
+}
+static inline const uint8_t *const *qiActiveFrames() {
+  return (g_readMode == 0) ? QI_FULL_SEG_FRAMES : QI_3SEG_FRAMES;
+}
+static inline const uint8_t *qiActiveRespLens() {
+  return (g_readMode == 0) ? QI_FULL_SEG_RESP_LENS : QI_3SEG_RESP_LENS;
+}
+static inline const uint16_t *qiActiveMergeOff() {
+  return (g_readMode == 0) ? QI_FULL_SEG_MERGE_OFF : QI_3SEG_MERGE_OFF;
+}
 
 // ---- M5：段索引 / 拼接缓冲 / 轮次结果（P1/P3/P5/P6/P7/P8/P13）----------------
 static uint8_t  g_segIndex = 0;                    // 0=S1 / 1=S2 / 2=S3（=0 模式恒为 0=FULL）
@@ -456,13 +479,12 @@ static void ntpTick() {
 #if !RS485_MODE_LOOPBACK_SELFTEST
 // 段号标签（P10：解析日志要能看出当前段号与功能码 0x04）
 static const char *qiSegTagFor(uint8_t idx) {
-#if QI_READ_SPLIT_3SEG
+  if (g_readMode == 0) {              // 一帧读全：失败段 tag = "F"
+    (void)idx;
+    return QI_SEG_TAG_FULL;
+  }
   static const char *const kTag[3] = { "S1", "S2", "S3" };
   return (idx < 3) ? kTag[idx] : "S?";
-#else
-  (void)idx;
-  return "FULL";
-#endif
 }
 static const char *qiSegTag() { return qiSegTagFor(g_segIndex); }
 
@@ -473,6 +495,7 @@ static void recordSegFail(const char *reason) {
     g_failSeg     = g_segIndex;
     g_failReason  = reason;
   }
+  if (g_readMode == 0 && g_fullConsecFail < 255) g_fullConsecFail++;   // 批次 2：一帧模式失败轮计数
   if (g_segFailStreak[g_segIndex] < 255) g_segFailStreak[g_segIndex]++;
   if (g_segFailStreak[g_segIndex] >= 3) {   // P7：连续失败 N=3 起整轮丢弃并显式告警
     Serial.printf("[M5] PARTIAL/FAIL SEG=%s 连续失败 %u 次 原因=%s（本轮整体丢弃，不上传残缺数据）\n",
@@ -482,6 +505,10 @@ static void recordSegFail(const char *reason) {
 
 static void recordSegOk() {
   g_segFailStreak[g_segIndex] = 0;      // P7：成功即清零
+  if (g_readMode == 0) {                // 批次 2：一帧成功 => 曾成功 + 清连续失败（此后永不降级）
+    g_fullEverOk     = true;
+    g_fullConsecFail = 0;
+  }
 }
 #endif  // !RS485_MODE_LOOPBACK_SELFTEST
 
@@ -493,7 +520,7 @@ static void recordSegOk() {
 //   末尾追加我方相对老师版本的两处改进（02_docs/16 9.4）：
 //     - "raw"：78 字节原始寄存器值 HEX => 公式可演进 + 历史可重放（老师版没有；硬约束 12）
 //     - "quality" / "invalid"：无效字段（量程越界 / 无传感器伪装）显式标出
-//   另有 "seg"：三段读取 = "3"，一帧读全 = "0"。
+//   另有 "seg"：三段读取 = "3"，一帧读全 = "1"（批次 2 起运行时判定）。
 // 本段只做"读出来再换算"，不改 485 侧任何逻辑（帧 / 段数 / 超时 / 解析 / CRC 全不动）。
 // ---------------------------------------------------------------
 
@@ -514,11 +541,10 @@ static void addInvalid(char *out, size_t cap, const char *name) {
   if (room > 0) strncat(out, name, room);
 }
 
-#if QI_READ_SPLIT_3SEG
-static const char *const QI_SEG_TAG_JSON = "3";   // 三段读取（S1+S2+S3）
-#else
-static const char *const QI_SEG_TAG_JSON = "0";   // 一帧读全（未分段）
-#endif
+// 数据行 seg（成功轮读取模式）：一帧读全 -> "1"；三段读取 -> "3"（批次 2 起运行时判定）
+static inline const char *qiDataSegTag() {
+  return (g_readMode == 0) ? QI_SEG_TAG_MODE_FULL : QI_SEG_TAG_MODE_3SEG;
+}
 
 // 换算口径 = 05_hardware/STB3-125_字段字典.csv 的 conv 列：
 //   raw/10、raw/1000、raw-40、raw/100、raw*0.01、1:1、高字、(H*65536)/1000+L
@@ -625,7 +651,7 @@ static bool buildDataJson(const char *ts, bool tsOk) {
 
   appendf(g_payload, sizeof(g_payload), &pos, &trunc,
           "\"quality\":\"%s\",\"invalid\":\"%s\",\"seg\":\"%s\",\"raw\":\"%s\"}",
-          (invalid[0] != '\0') ? "PARTIAL" : "OK", invalid, QI_SEG_TAG_JSON, rawHex);
+          (invalid[0] != '\0') ? "PARTIAL" : "OK", invalid, qiDataSegTag(), rawHex);
 
   return !trunc;
 }
@@ -644,10 +670,11 @@ static bool buildHeartbeatJson(const char *ts, bool tsOk) {
   ++g_seq;                                    // 每发一行自增 1（uint32_t 回绕正常）
   appendf(g_payload, sizeof(g_payload), &pos, &trunc,
           "{\"seq\":%lu,\"dev\":\"%s\",\"ts\":\"%s\",\"ts_ok\":%s,\"type\":\"hb\","
-          "\"rssi\":%d,\"free_heap\":%u,\"poll_ok\":%lu,\"poll_err\":%lu,\"udp_tx\":%lu,"
+          "\"rssi\":%d,\"free_heap\":%u,\"mode\":\"%s\",\"poll_ok\":%lu,\"poll_err\":%lu,\"udp_tx\":%lu,"
           "\"queue\":%u,\"dropped\":%u}",
           (unsigned long)g_seq, g_devStr, ts, tsOk ? "true" : "false",
           (int)WiFi.RSSI(), (unsigned)ESP.getFreeHeap(),
+          (g_readMode == 0) ? "full" : "3seg",
           (unsigned long)g_pollOk, (unsigned long)g_pollErr, (unsigned long)g_udpTx,
           (unsigned)0, (unsigned)0);
   return !trunc;
@@ -784,7 +811,7 @@ static void logRxHex() {
 //     不按段写死 37/19。每段独立校验（P6）；失败原因记入 g_failReason 供 P13 上行。
 static void parseResponse() {
   const char   *tag     = qiSegTag();
-  const uint8_t reqFunc = QI_SEG_FRAMES[g_segIndex][1];   // M5 恒为 0x04（只读）
+  const uint8_t reqFunc = qiActiveFrames()[g_segIndex][1];   // M5 恒为 0x04（只读）
 
   // (1) 超时 / 半帧：三级超时或字符间隔先触发
   if (g_rxIncomplete) {
@@ -876,7 +903,7 @@ static void parseResponse() {
   }
 
   // (7) P5 拼接：把数据域（去 addr/func/byteCount/CRC）拷到合并缓冲的段偏移
-  const uint16_t off = QI_SEG_MERGE_OFF[g_segIndex];
+  const uint16_t off = qiActiveMergeOff()[g_segIndex];
   if ((uint32_t)off + (uint32_t)byteCount > (uint32_t)QI_MERGED_LEN) {
     g_statFail++; recordSegFail("LEN");
     Serial.printf("[M4] 帧长异常 段=%s 数据 %u 字节越界（off=%u / 合并缓冲 %u）SEG=%s REQ=0x%02X\n",
@@ -961,16 +988,10 @@ static void stateTick() {
       g_txLen       = MODBUS_TX_LEN;
       g_expectRxLen = MODBUS_TX_LEN;
 #else
-#if QI_READ_SPLIT_3SEG
-      // P2：按 g_segIndex 选当前段请求帧（只读 0x04，无写 / 合闸 / 分闸 / 广播）
-      memcpy(g_txFrame, QI_SEG_FRAMES[g_segIndex], QI_SEG_FRAME_LEN);
+      // P2：按 g_readMode + g_segIndex 选当前请求帧（只读 0x04，无写 / 合闸 / 分闸 / 广播）
+      memcpy(g_txFrame, qiActiveFrames()[g_segIndex], QI_SEG_FRAME_LEN);
       g_txLen       = QI_SEG_FRAME_LEN;
-      g_expectRxLen = QI_SEG_RESP_LENS[g_segIndex];   // 仅兜底初值；判长仍按 byte count 动态算（P4）
-#else
-      memcpy(g_txFrame, QI_FULL_FRAME_BYTES, QI_SEG_FRAME_LEN);
-      g_txLen       = QI_SEG_FRAME_LEN;
-      g_expectRxLen = QI_FULL_RESP_LEN;               // 83 字节兜底初值
-#endif
+      g_expectRxLen = qiActiveRespLens()[g_segIndex];   // 仅兜底初值；判长仍按 byte count 动态算（P4）
 #endif
 #if RS485_DE_PIN >= 0
       // MAX485 / MAX3485 半双工：先把方向切到发送，否则帧根本上不了总线
@@ -1067,7 +1088,7 @@ static void stateTick() {
 #if !RS485_MODE_LOOPBACK_SELFTEST
       // P3：一段（无论成败）结束 -> 段号前进；走完最后一段回 0 并转 ST_SEND（本轮结束）
       g_segIndex++;
-      if (g_segIndex >= QI_SEG_COUNT) {
+      if (g_segIndex >= qiActiveSegCount()) {
         g_segIndex = 0;
         g_state    = ST_SEND;              // P13：本轮结束 -> 恰好发一行 UDP
       } else {
@@ -1081,7 +1102,19 @@ static void stateTick() {
     }
 
     case ST_SEND:
-      sendUdpPayload();                    // P13：总线模式发「78 字节 / FAIL:Sx:原因」；回环模式保留心跳
+      sendUdpPayload();                    // P13：总线模式发「心跳 +（失败）err 行 +（全成功）数据行」；回环模式保留心跳
+#if !RS485_MODE_LOOPBACK_SELFTEST
+      // 批次 2：一帧读全失败自动降级判定（只在轮末判一次，一轮一次；本会话不回切）。
+      //   从未成功过 && 连续失败达阈值 => 降级为 3 段（err 行已在上行里按旧模式标好 "F"）；
+      //   曾经成功过则永不降级（偶发失败是总线问题，3 段同样会失败）。
+      if (g_readMode == 0 && !g_fullEverOk && g_fullConsecFail >= QI_FULLFRAME_FALLBACK_AFTER) {
+        g_readMode       = 1;
+        g_fullConsecFail = 0;
+        Serial.printf("[M5] 一帧读全连续 %u 轮失败（%s），本会话降级为 3 段读取（E-02 B 分支）\n",
+                      (unsigned)QI_FULLFRAME_FALLBACK_AFTER,
+                      (g_failReason != NULL) ? g_failReason : "LEN");
+      }
+#endif
       g_nextPollMs += POLL_INTERVAL_MS;    // P9：整轮（三段全结束）后才推进 1s 节拍
       // 已落后一个周期以上（例如刚重连）就重新对齐，避免补发风暴
       if ((int32_t)(millis() - g_nextPollMs) >= 0) g_nextPollMs = millis() + POLL_INTERVAL_MS;
@@ -1162,34 +1195,29 @@ void setup() {
   Serial.printf("[485] 方向控制：%s\n", (RS485_DE_PIN >= 0)
                 ? "EN 由 GPIO 动态切换（MAX485 / MAX3485 接法，RS485_DE_PIN 已配置）"
                 : "无（EN 固定电平，MAX13487 / MAX13488 接法；RS485_DE_PIN = -1）");
-#if QI_READ_SPLIT_3SEG
   {
     char b1[3 * QI_SEG_FRAME_LEN + 1], b2[3 * QI_SEG_FRAME_LEN + 1], b3[3 * QI_SEG_FRAME_LEN + 1];
+    char bf[3 * QI_SEG_FRAME_LEN + 1];
     bytesToHex(QI_SEG1_FRAME_BYTES, QI_SEG_FRAME_LEN, b1, sizeof(b1));
     bytesToHex(QI_SEG2_FRAME_BYTES, QI_SEG_FRAME_LEN, b2, sizeof(b2));
     bytesToHex(QI_SEG3_FRAME_BYTES, QI_SEG_FRAME_LEN, b3, sizeof(b3));
-    Serial.printf("[485] M5 模式=3 段读取（QI_READ_SPLIT_3SEG=1）从站地址 %u 功能码 0x%02X 读输入寄存器：\n",
+    bytesToHex(QI_FULL_FRAME_BYTES, QI_SEG_FRAME_LEN, bf, sizeof(bf));
+    Serial.printf("[485] M5 模式=运行时自适应（批次 2）从站地址 %u 功能码 0x%02X 读输入寄存器：\n",
                   (unsigned)RS485_SLAVE_ADDR, (unsigned)MODBUS_FUNC_READ_INPUT);
-    Serial.printf("[485]   S1 寄存器 0->15  请求 %s  期望响应 %u 字节\n", b1, (unsigned)QI_SEG1_RESP_LEN);
-    Serial.printf("[485]   S2 寄存器 16->31 请求 %s  期望响应 %u 字节\n", b2, (unsigned)QI_SEG2_RESP_LEN);
-    Serial.printf("[485]   S3 寄存器 32->38 请求 %s  期望响应 %u 字节\n", b3, (unsigned)QI_SEG3_RESP_LEN);
-    Serial.printf("[485] 一轮 = S1->S2->S3 依次跑完（段间 >= %lu ms 静默），整轮 %lu ms；合并 %u 字节\n",
+    Serial.printf("[485]   启动默认一帧读全：请求 %s  期望响应 %u 字节（39 个寄存器，E-02 A 分支）\n",
+                  bf, (unsigned)QI_FULL_RESP_LEN);
+    Serial.printf("[485]   从未成功且连续 %u 轮失败自动降级为 3 段（E-02 B 分支，本会话不回切）：\n",
+                  (unsigned)QI_FULLFRAME_FALLBACK_AFTER);
+    Serial.printf("[485]     S1 寄存器 0->15  请求 %s  期望响应 %u 字节\n", b1, (unsigned)QI_SEG1_RESP_LEN);
+    Serial.printf("[485]     S2 寄存器 16->31 请求 %s  期望响应 %u 字节\n", b2, (unsigned)QI_SEG2_RESP_LEN);
+    Serial.printf("[485]     S3 寄存器 32->38 请求 %s  期望响应 %u 字节\n", b3, (unsigned)QI_SEG3_RESP_LEN);
+    Serial.printf("[485]   3 段一轮段间 >= %lu ms 静默，整轮 %lu ms；合并 %u 字节\n",
                   (unsigned long)RS485_SEG_GAP_MS, (unsigned long)POLL_INTERVAL_MS, (unsigned)QI_MERGED_LEN);
   }
-#else
-  {
-    char bf[3 * QI_SEG_FRAME_LEN + 1];
-    bytesToHex(QI_FULL_FRAME_BYTES, QI_SEG_FRAME_LEN, bf, sizeof(bf));
-    Serial.printf("[485] M5 模式=一帧读全（QI_READ_SPLIT_3SEG=0）从站地址 %u 功能码 0x%02X 读输入寄存器 0->38：\n",
-                  (unsigned)RS485_SLAVE_ADDR, (unsigned)MODBUS_FUNC_READ_INPUT);
-    Serial.printf("[485]   请求 %u 字节 | %s  期望响应 %u 字节（39 个寄存器）\n",
-                  (unsigned)QI_SEG_FRAME_LEN, bf, (unsigned)QI_FULL_RESP_LEN);
-  }
-#endif
 #endif
 
   g_nextPollMs = millis() + POLL_INTERVAL_MS;
-  Serial.println("[BOOT] M5+批次1 就绪：WiFi + NTP + UDP（JSON 上行：每轮 1 行心跳；三段全成功再加 1 行数据，含 raw 78 字节 HEX）+ 485 3 段读取");
+  Serial.println("[BOOT] M5+批次1+批次2 就绪：WiFi + NTP + UDP（JSON 上行：每轮 1 行心跳含 mode；全成功再加 1 行数据，含 raw 78 字节 HEX）+ 485 运行时自适应（默认一帧读全，连续失败 3 轮自动降级 3 段）");
 }
 
 void loop() {

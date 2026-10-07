@@ -274,8 +274,11 @@ def store(conn, pkt, device_id, addr, src, fields, seq=None, known_missing=()):
     if known:
         notes.append("KNOWN_MISSING:" + ",".join(sorted(known)))
     rec = {c: None for c, _ in META_COLS}
+    # seg 适配批次 2（2026-10-07 砚青）：数据行 seg="1"（一帧读全）/ "3"（三段）。
+    # seg_ok 按实际读取模式记：一帧 "1"；三段沿用 "111"（3 段全成功）。
+    # 失败行维持 "000"（无完整数据），段 tag 在 err_reason 里（"F:..." / "S2:..."）。
     rec.update(device_id=device_id, slave_addr=addr, collect_time=pkt["ts"], save_time=now,
-               quality=quality, seg_ok="111",
+               quality=quality, seg_ok=("1" if pkt.get("seg") == "1" else "111"),
                invalid_fields=",".join(sorted(invalid)),
                err_reason=";".join(notes) or None,
                src=src, seq=seq, raw_hex=" ".join(pkt["hexs"]))

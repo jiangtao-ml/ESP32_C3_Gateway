@@ -131,10 +131,12 @@
 #define MODBUS_EXPECT_RESP_LEN       9
 
 // ---- M5：0x04 读输入寄存器请求帧（C3~C7）------------------------------------
-// C3：读取方案开关（编译期宏，默认 1 开）
-//   1 = 3 段读取（S1/S2/S3，M5 默认；用于验 E-02 的 B 分支）
-//   0 = 一帧读全（QI_FULL_FRAME，仅用于验 E-02 的 A 分支）
-#define QI_READ_SPLIT_3SEG           1
+// C3：读取方案开关 —— 【批次 2 起废除编译期二选一，改为运行时自适应】
+//   运行时变量 g_readMode（定义在 esp32c3_gateway.ino）：
+//     0 = 一帧读全（QI_FULL_FRAME，启动默认；用于验 E-02 的 A 分支）
+//     1 = 3 段读取（S1/S2/S3；从未成功且连续 QI_FULLFRAME_FALLBACK_AFTER 轮失败时自动降级）
+//   两组常量表均始终编译，按 g_readMode 选择；降级后本会话不回切。
+//   ⚠️ 原编译期宏 QI_READ_SPLIT_3SEG 已删除（不再有编译期二选一）。
 
 // C4：3 段请求帧（每段均 8 字节）
 //   S1 覆盖 30001~30016（0x0000~0x000F，16 个寄存器）
@@ -146,7 +148,7 @@
 #define QI_SEG3_FRAME  {0x01, 0x04, 0x00, 0x20, 0x00, 0x07, 0xB0, 0x02}
 #define QI_SEG_FRAME_LEN             8      // 地址1 + 功能1 + 起始2 + 数量2 + CRC2
 
-// C5：一帧读全请求帧（QI_READ_SPLIT_3SEG = 0 时使用）
+// C5：一帧读全请求帧（运行时 g_readMode = 0 时使用）
 //   覆盖 30001~30039（0x0000~0x0026，39 个寄存器）
 //   ⚠️ CRC 已由 06_tests/m5_frame_check.py 独立复核，逐字节照抄。
 #define QI_FULL_FRAME  {0x01, 0x04, 0x00, 0x00, 0x00, 0x27, 0xB0, 0x10}
@@ -157,6 +159,17 @@
 #define QI_SEG2_RESP_LEN             37     // 1 + 1 + 1 + 2×16 + 2
 #define QI_SEG3_RESP_LEN             19     // 1 + 1 + 1 + 2×7  + 2
 #define QI_FULL_RESP_LEN             83     // 1 + 1 + 1 + 2×39 + 2
+
+// 批次 2：一帧读全失败自动降级阈值 —— 从未成功且连续失败达此轮数即降级为 3 段。
+//   仅当"本会话从未成功过"才降级；曾经成功过则永不降级（偶发失败是总线问题，3 段同样会失败）。
+#define QI_FULLFRAME_FALLBACK_AFTER  3
+
+// 批次 2：seg 取值常量
+//   数据行 seg（成功轮读取模式）：一帧读全 -> "1"；三段读取 -> "3"
+//   err 行 seg（失败段 tag）：一帧读全 -> "F"；三段读取 -> "S1"/"S2"/"S3"
+#define QI_SEG_TAG_FULL              "F"
+#define QI_SEG_TAG_MODE_FULL         "1"
+#define QI_SEG_TAG_MODE_3SEG         "3"
 
 // C7：3 段合并缓冲（39 个寄存器 × 2 字节）；拼接偏移 S1->0、S2->32、S3->64
 #define QI_MERGED_LEN                78
@@ -203,4 +216,4 @@
 //   0 = 严格两类行（心跳 + 数据，对齐老师版本）。
 #define QI_SEND_ERR_ROW              1
 
-// 数据行 "seg" 取值：三段读取 -> "3"，一帧读全 -> "0"（指令 3.1 写 "<0|1|3>"；"1" 本固件不产出）
+// 数据行 "seg" 取值（批次 2 起）：一帧读全 -> "1"，三段读取 -> "3"（指令 3.1 的 "<0|1|3>"）
