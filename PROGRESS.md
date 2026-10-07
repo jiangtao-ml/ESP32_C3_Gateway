@@ -17,7 +17,7 @@
 | 状态 | 内容 |
 | --- | --- |
 | ✅ 已完成 | **M0–M5 全部通过**。M5 真机联调 2026-10-05 实测：功能码 `0x04` + 3 段读取，**59/60**、每包 **78 字节 = 39 寄存器** |
-| 🚧 正在做 | **功能对齐 批次 1**：**代码已完成 + 独立复核通过**（`1004899` / `39284`，0 error / 0 warning）⇒ **⏳ 只差真机跑一次**（**未 commit**，改动在 `config.h` 与 `esp32c3_gateway.ino`） |
+| 🚧 正在做 | **功能对齐 批次 1**：**代码完成 + 独立复核通过 + 真机验证 100% 通过（2026-10-07）**（`1004899`/`39284`；300s 采样 poll_ok=403 / **poll_err=0**，39 字段 + raw 78 字节全对）。**⏳ 收尾两件**：① `Serial.setTxTimeoutMs(0)` 一行待独立复核；② commit 批次 1 |
 | ⬜ 接着做 | 批次 2（一帧读全 + 失败降级 3 段，顺带答 E-02）→ 批次 3（AP + Web 配置页 + `/status` + NVS）→ **M6 压测**（前置 ~~先定 PlatformIO core~~ ⇒ **core 已定 3.x 且 2026-10-07 编译打通**，M6 前只剩"迁移后对照验证"）→ M7 验收 |
 | ✅ 新进展 | **PlatformIO 3.x 迁移编译打通（2026-10-07）**：`pioarduino@55.03.311`（Arduino 3.3.11/IDF 5.5.5）首编 SUCCESS，RAM +100 B / Flash +1.5% vs Arduino 基线 ⇒ 详见 `02_docs/20` §8 |
 | ✅ 交付补齐 | `02_docs/08_M5真机联调记录.md` **已写**（2026-10-06，砚青）—— 原"唯一欠交付"已闭环 |
@@ -222,5 +222,7 @@ compile --fqbn esp32:esp32:esp32c3:CDCOnBoot=cdc 01_firmware/esp32c3_gateway
 | 12 | **新增 `02_docs/19`（PlatformIO core 选型决策备忘）**：建议钉 `3.x`（非 `2.0.17`），含 API 实测审计 + 官方支持/安全事实 + 自持措施 | `02_docs/19_...md`；本文件 §8.1-4 |
 | 13 | **新增 `02_docs/20`（工具链国内镜像与离线安装）**：确认 `-cn` = Espressif 官方 CN 镜像渠道标记；归纳镜像通道**规则 A/B**；给出 PlatformIO 3.x 迁移的**完整包清单 + 逐包实测通道**（`github.com` 本机实测超时 = 根因） | `02_docs/20_...md`；`02_docs/11` C-02 闭环（v1.3） |
 | 14 | **PlatformIO 3.x 迁移编译打通（2026-10-07）**：`pio_cn_seed.py` v2.0（平台驱动 + 桩包解析 + 双通道）；平台切到 `pioarduino@55.03.311`（Arduino 3.3.11/IDF 5.5.5）；**首编 SUCCESS**（RAM +100 B / Flash +1.5% vs Arduino 基线）；`platformio.ini` 改 `lib_ldf_mode = deep`（禁 `+`，issue #9782）+ `main.cpp` 加 WiFi 锚点；6 个环境坑 playbook 入档 | `06_tests/pio_cn_seed.py`；`01_firmware/pio_verify/{platformio.ini,src/main.cpp}`；`02_docs/20` §8（v1.1）；本文件 §5b |
+| 15 | **批次 1 真机前置验证 + USB CDC 阻塞 bug 修复（2026-10-07，砚青）**：485 悬空安全态烧录（基线一致 1004899/39284）+ 上行验证通过（hb/err JSON、NTP ts_ok、WiFi/UDP 通）。🔴 **发现并修一个真 bug**：无主机读串口时 `HWCDC::write` 默认 `tx_timeout_ms=100` 阻塞 ⇒ 轮询退化 19s/轮（真机拔 USB 必踩）；**修复 = `Serial.setTxTimeoutMs(0)` 一行**，验证恢复 1s/轮（60s/118 包）。⚠️ **该行改动待 Codex/用户独立复核**；数据行（39 字段 + raw 78 字节）待接真机验证后再 commit | `01_firmware/esp32c3_gateway/esp32c3_gateway.ino`（setup 处）；`03_logs/batch1_*_20261007.log` |
+| 16 | **批次 1 真机验证通过（2026-10-07）**：合闸采样 300s，555 包 = 290 hb + 265 data + **0 err**，`poll_ok=403/poll_err=0` = **100%**（老师基线 96.9%）；39 字段 + 换算全对（A 相 222V/0.16A/49.9Hz/18W、N 温 28℃、`openState 00F0` 合闸）；**电量公式 `(H×65536)/1000+L` 真机实证**（A_H=4 + 0xE60F=58895 → 59157.144 ✓）；USB CDC 修复真机侧生效（每秒一轮） | `03_logs/batch1_real_20261007.log`；本文件 §8.1 电量待确认项推进 |
 
 > **原 §8 已闭环（2026-10-06）**：① 任务书进度字段过期 → ✅ 已同步（v0.4.0）；② 角色口径两处旧表述（`00_context.md` 一、任务书 §3）→ ✅ 已同步。
