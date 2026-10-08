@@ -54,7 +54,7 @@
 // ---------------------------------------------------------------
 // 轮询节奏与 WiFi 自恢复（全部非阻塞）
 // ---------------------------------------------------------------
-#define POLL_INTERVAL_MS     1000   // 1 秒循环（millis() 非阻塞）
+#define POLL_INTERVAL_MS     1000   // 默认轮询周期（NVS poll_s 可覆盖，1-5s；运行时变量 g_pollIntervalMs）；1 秒循环（millis() 非阻塞）
 #define WIFI_CHECK_INTERVAL_MS  5000  // 每 5 秒检查一次 WiFi 状态
 #define WIFI_RECONNECT_INTERVAL_MS 5000  // 断开后重连节流：≥5s 一次
 #define NTP_RETRY_INTERVAL_MS      60000 // 未同步时重试 SNTP 的周期（任务书 §6.1.2：WiFi 已连上且仍未对时时每 60s 重试一次）
@@ -217,3 +217,36 @@
 #define QI_SEND_ERR_ROW              1
 
 // 数据行 "seg" 取值（批次 2 起）：一帧读全 -> "1"，三段读取 -> "3"（指令 3.1 的 "<0|1|3>"）
+// ---------------------------------------------------------------
+// 批次 3（常驻 AP + Web 配置页 + /status + NVS 持久化）：版本号 / AP 默认 / NVS 键名 / 校验区间
+// 事实来源：04_ai_prompts/07_Codex提示词_批次3_AP与Web配置与NVS.md 三 config.h
+// 本段只新增常量与键名，不改任何 485 侧逻辑与 UDP JSON 上行格式。
+// ---------------------------------------------------------------
+#define FW_VERSION                   "0.6.0-batch3"   // /status 的 fw 字段
+#define AP_DEFAULT_SSID_PREFIX       "ESP485-"        // 常驻 SoftAP SSID 前缀（+ MAC 后 6 位 = dev）
+#define AP_DEFAULT_PASS_PREFIX       "485-"           // 默认口令派生前缀（+ MAC 后 4 位 HEX，恰 8 字符）
+#define QI_AP_PASS_MIN_LEN           8                // softAP 口令下限：1~7 字符会被协议栈拒绝并启动失败
+
+// NVS（Preferences）命名空间与键名；读法：NVS 有值用 NVS，无值回落编译期默认（secrets.h / 本文件）
+#define NVS_NAMESPACE                "cfg485"
+#define NVS_KEY_WIFI_SSID            "wifi_ssid"
+#define NVS_KEY_WIFI_PASS            "wifi_pass"
+#define NVS_KEY_WIFI_OPEN            "wifi_open"
+#define NVS_KEY_NTP1                 "ntp1"
+#define NVS_KEY_UDP_IP               "udp_ip"
+#define NVS_KEY_UDP_PORT             "udp_port"
+#define NVS_KEY_POLL_S               "poll_s"
+#define NVS_KEY_ADMIN_USER           "admin_user"
+#define NVS_KEY_ADMIN_PASS           "admin_pass"
+#define NVS_KEY_AP_PASS              "ap_pass"
+
+// 采集周期允许区间（秒）：Web 表单校验用（老师版口径 1-5s）
+#define POLL_PERIOD_MIN_S            1
+#define POLL_PERIOD_MAX_S            5
+
+// 配置页缓冲：模板 3359 字符 + 变量展开最坏约 962 字符 => 约 4.3 KB（8192 留 ~2 倍余量）
+//   snprintf 溢出会显式告警并截断（绝不静默），见 web_config.h 的 webSendPage()。
+#define QI_WEB_PAGE_MAX              8192
+// /status JSON 缓冲：老师 22 项 + 我方 3 项；最坏约 745 字节（超长 SSID 32B、chrony 47B、5 个计数各 10 位）。
+//   768 仅余 ~23 B 偏紧，取 1024 留余量（snprintf 溢出会显式告警并回 500，绝不静默截断）。
+#define QI_STATUS_JSON_MAX           1024

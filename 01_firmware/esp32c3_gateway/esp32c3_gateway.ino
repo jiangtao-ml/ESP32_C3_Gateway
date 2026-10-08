@@ -2,7 +2,8 @@
  * esp32c3_gateway.ino
  * ESP32-C3 RS-485 采集网关（替换树莓派网关项目）
  *
- * 当前里程碑：M5 + 批次2 —— QI 真机协议：功能码 0x04 读输入寄存器 + 39 寄存器（一帧读全 / 3 段运行时自适应）
+ * 当前里程碑：M5 + 批次1/2/3 —— QI 真机协议：功能码 0x04 读输入寄存器 + 39 寄存器（一帧读全 / 3 段运行时自适应）
+ *             批次 3：常驻 AP + Web 配置页 + /status + NVS 持久化（只包一层配置层，485 侧逻辑不变）
  *
  * 已实现：WiFi 连接与最小自恢复、SNTP 对时（含 UNSYNCED 降级）、每秒 1 轮 UDP 上行、
  *        每秒 1 轮 Modbus RTU 请求/响应（一轮 = S1->S2->S3 三个子回合，同一秒内依次跑完）：
@@ -13,13 +14,19 @@
  *        【批次 2】运行时自适应读取：启动先发一帧读全（01 04 00 00 00 27 B0 10，期望 83 字节），
  *        从未成功且连续 QI_FULLFRAME_FALLBACK_AFTER 轮失败则本会话降级为 3 段（S1/S2/S3，37/37/19）；
  *        曾经成功过则永不降级；心跳行新增 mode 字段（"full"/"3seg"）供远程观察当前模式。
+ *        【批次 3】常驻 SoftAP + Web 配置页（4 卡片；POST /save 与 GET /reset 走 Basic Auth）
+ *        + /status（老师版 22 项逐字 + 我方 dev/mode/free_heap）+ NVS 持久化（命名空间 cfg485，
+ *        保存后立即生效、无需重启）；配置层实现于 web_config.h，485 状态机与 UDP JSON 上行一行不改。
  * 未实现：M6 起的状态机加固与断线补传 —— 留待后续；本文件只做读操作，绝不含写/合闸/分闸帧
  *        （M4 的 0x03 回环帧仅保留给 RS485_MODE_LOOPBACK_SELFTEST=1 的串口层自检）
  *
  * 硬约束：
  *   - 全程 millis() 非阻塞调度，禁止 delay()（唯一例外：setup() 内有界等待 USB CDC 枚举，最多 2s）
- *   - WiFi 凭据只来自 secrets.h（不入库），本文件不出现任何凭据明文
- *   - 不引入第三方库（仅用 ESP32 core 自带的 WiFi / WiFiUdp / time / HardwareSerial）
+ *   - 凭据一律不入库 / 不打日志：WiFi 凭据默认值来自 secrets.h；AP 口令与管理口令来自 NVS 或
+ *     MAC 派生算法（仅算法入代码）。本文件与 web_config.h 均不出现任何真实密码明文
+ *     （串口只打印"已设置 / 未设置 / 开放网络"）
+ *   - 不引入第三方库（仅用 ESP32 core 自带的 WiFi / WiFiUdp / time / HardwareSerial
+ *     / WebServer / Preferences）；配置页手写 HTML 存 PROGMEM，JSON 手写 snprintf 组装
  *   - ⚠️ USB CDC On Boot 必须 = Enabled：否则 Serial 会落到 UART0（GPIO20/21），
  *     与 UART1 争用同一对引脚
  *   - ⚠️ 485 模块的 RXO 为 5V 时必须先 1kΩ/2kΩ 分压再进 GPIO20
@@ -194,6 +201,27 @@ static uint32_t g_tRxStartMs    = 0;      // 三级超时的共同基准（已�
 static uint32_t g_tRxLastByteMs = 0;      // 最后一个字节到达时刻（字符间隔判据）
 static bool     g_rxIncomplete  = false;  // true = 本次未收满预期帧长（超时 / 半帧）
 static uint32_t g_statOk = 0, g_statFail = 0, g_statTimeout = 0;
+// ---------------------------------------------------------------
+// 批次 3：运行时可配置层（NVS <-> 变量；编译期宏降级为"默认值"）
+//   485 采集状态机与 UDP JSON 上行【一行不改】：本层只提供"配置从哪来"。
+//   变量在此定义（供 wifiTick / ntpTick / udpSendLine / stateTick 使用）；
+//   配置装载 + Web 路由实现在同目录 web_config.h（在本文件 stateTick() 之后 include）。
+//   初始值 = 编译期默认（secrets.h 的 WiFi、config.h 的 NTP/UDP/周期），
+//   loadConfig() 之后若 NVS 有值则被覆盖。任何真实密码一律不打日志。
+// ---------------------------------------------------------------
+static char     g_wifiSsid[33]    = WIFI_SSID;        // NVS wifi_ssid；无值回落 secrets.h
+static char     g_wifiPass[65]    = WIFI_PASSWORD;    // NVS wifi_pass；无值回落 secrets.h（绝不回显 / 不打日志）
+static bool     g_wifiOpen        = false;            // NVS wifi_open：开放网络（无密码）
+static char     g_udpTargetIp[16] = UDP_TARGET_IP;    // NVS udp_ip；无值回落 config.h
+static uint16_t g_udpTargetPort   = UDP_TARGET_PORT;  // NVS udp_port；无值回落 config.h
+static char     g_ntpPrimary[48]  = NTP_SERVER_1;     // NVS ntp1（NTP 主源）；备源 NTP_SERVER_2/3 不变
+static uint32_t g_pollIntervalMs  = POLL_INTERVAL_MS; // NVS poll_s（1~5s）；无值回落 POLL_INTERVAL_MS
+static char     g_adminUser[33]   = "admin";          // NVS admin_user（Web 写操作 Basic Auth 账号）
+static char     g_adminPass[65]   = { 0 };            // NVS admin_pass；无值 = 与 AP 口令同源的 MAC 派生算法
+static char     g_apPass[65]      = { 0 };            // NVS ap_pass（常驻 SoftAP 口令；<8 字符会被 softAP 拒绝）
+static char     g_apSsid[33]      = { 0 };            // ESP485-<MAC 后 6 位>（= g_devStr），loadConfig() 填充
+static bool     g_configured      = false;            // NVS 是否存过任意配置键（/status 的 configured）
+static bool     g_wifiFromBuiltin = true;             // WiFi 凭据是否来自编译期内置默认（secrets.h）
 
 // ---------------------------------------------------------------
 // 小工具
@@ -324,7 +352,7 @@ static void wifiTick() {
     WiFi.reconnect();                      // 已连过：保留凭据做快速重连
     Serial.printf("[WIFI] 第 %lu 次重连（WiFi.reconnect）\n", (unsigned long)g_reconnectCount);
   } else {
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);  // 首次从未连上：重新发起连接
+    WiFi.begin(g_wifiSsid, g_wifiOpen ? (const char *)nullptr : g_wifiPass);   // 批次 3：用运行时凭据（NVS 或 secrets.h 默认）重连
     Serial.printf("[WIFI] 第 %lu 次重连（WiFi.begin）\n", (unsigned long)g_reconnectCount);
   }
 }
@@ -350,7 +378,7 @@ static void wifiTick() {
 //     不是持久标志 ⇒ 改用 reachability + 自记「本轮已发起对时」标志（更稳）。
 // 不含任何第三方库，全部为 ESP32 core 自带 lwIP API。
 // ---------------------------------------------------------------
-static const char *const kNtpCfg[3] = { NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3 };
+static const char *kNtpCfg[3] = { NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3 };   // 批次 3：slot0 指向运行时主源（loadConfig() 里改为 g_ntpPrimary）
 
 // 「已同步」的唯一判据：本轮会话确已收到 NTP 回包（任一 slot reachability != 0）。
 // ⚠️ 绝不能用 getLocalTime()：芯片不断电时 RTC 域保留上一轮的时间，软复位后
@@ -429,9 +457,9 @@ static void ntpTick() {
     // ⚠️ 必须在 WiFi 连上之后调用：网络未就绪时 SNTP 初始化会失败，表现为永不对时
     g_lastNtpTriggerMs        = millis();
     g_ntpTriggeredThisSession = true;
-    configTzTime(NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+    configTzTime(NTP_TZ_INFO, g_ntpPrimary, NTP_SERVER_2, NTP_SERVER_3);   // 批次 3：主源为运行时变量
     Serial.printf("[NTP] WiFi 已连上 -> 触发 SNTP 对时 TZ=%s 主=%s 备1=%s 备2=%s\n",
-                  NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+                  NTP_TZ_INFO, g_ntpPrimary, NTP_SERVER_2, NTP_SERVER_3);
   }
 
   if ((uint32_t)(millis() - g_lastNtpCheckMs) < 200) return;   // 节流，避免每轮都取时钟
@@ -446,7 +474,7 @@ static void ntpTick() {
   if (g_linkUp && !ntpConfirmed &&
       (uint32_t)(millis() - g_lastNtpTriggerMs) >= NTP_RETRY_INTERVAL_MS) {
     g_lastNtpTriggerMs = millis();
-    configTzTime(NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+    configTzTime(NTP_TZ_INFO, g_ntpPrimary, NTP_SERVER_2, NTP_SERVER_3);   // 批次 3：主源为运行时变量
     Serial.printf("[NTP] 仍未同步（本轮未收到 NTP 回包），重试 SNTP（周期 %lu ms）\n",
                   (unsigned long)NTP_RETRY_INTERVAL_MS);
   }
@@ -704,7 +732,7 @@ static bool buildErrJson(const char *ts, bool tsOk) {
 
 // 把 g_payload 中已组装好的一行发出去；成功（beginPacket / endPacket 都返回 1）则累加 udp_tx
 static bool udpSendLine() {
-  bool ok = (g_udp.beginPacket(UDP_TARGET_IP, UDP_TARGET_PORT) == 1);   // 不判返回值会让日志说谎：发失败仍打印"已发"
+  bool ok = (g_udp.beginPacket(g_udpTargetIp, g_udpTargetPort) == 1);   // 不判返回值会让日志说谎：发失败仍打印"已发"
   if (ok) {
     g_udp.write((const uint8_t *)g_payload, strlen(g_payload));
     ok = (g_udp.endPacket() == 1);
@@ -713,9 +741,9 @@ static bool udpSendLine() {
     g_udpTx++;
   } else {
     Serial.printf("[UDP][ERR] 发送失败（beginPacket/endPacket 未返回 1），目标 %s:%u\n",
-                  UDP_TARGET_IP, (unsigned)UDP_TARGET_PORT);
+                  g_udpTargetIp, (unsigned)g_udpTargetPort);
   }
-  Serial.printf("[UDP -> %s:%u] %s\n", UDP_TARGET_IP, (unsigned)UDP_TARGET_PORT, g_payload);
+  Serial.printf("[UDP -> %s:%u] %s\n", g_udpTargetIp, (unsigned)g_udpTargetPort, g_payload);
   return ok;
 }
 
@@ -1115,9 +1143,9 @@ static void stateTick() {
                       (g_failReason != NULL) ? g_failReason : "LEN");
       }
 #endif
-      g_nextPollMs += POLL_INTERVAL_MS;    // P9：整轮（三段全结束）后才推进 1s 节拍
+      g_nextPollMs += g_pollIntervalMs;    // P9：整轮（三段全结束）后才推进节拍（批次 3：周期为运行时变量，NVS poll_s 可覆盖）
       // 已落后一个周期以上（例如刚重连）就重新对齐，避免补发风暴
-      if ((int32_t)(millis() - g_nextPollMs) >= 0) g_nextPollMs = millis() + POLL_INTERVAL_MS;
+      if ((int32_t)(millis() - g_nextPollMs) >= 0) g_nextPollMs = millis() + g_pollIntervalMs;
 #if !RS485_MODE_LOOPBACK_SELFTEST
       g_roundFailed = false;               // 本轮结果已上报，复位
       g_failSeg     = 0xFF;
@@ -1127,6 +1155,15 @@ static void stateTick() {
       break;
   }
 }
+
+// ---------------------------------------------------------------
+// 批次 3：配置层（NVS 装载 + 常驻 SoftAP + Web 路由 + /status）
+//   放在此处 include：上方已定义全部运行时变量（g_devStr / g_readMode / g_timeSynced /
+//   g_udpTargetIp / g_ntpPrimary / g_pollIntervalMs ...）与 kNtpCfg / ntpHasReply 等工具函数，
+//   web_config.h 直接使用它们；编译期默认仍来自 config.h 与 secrets.h（NVS 无值时回落）。
+//   485 采集状态机与 UDP JSON 上行一行不改：本层只包在外面。
+// ---------------------------------------------------------------
+#include "web_config.h"
 
 // ---------------------------------------------------------------
 void setup() {
@@ -1141,7 +1178,7 @@ void setup() {
   for (uint32_t t0 = millis(); !Serial && (uint32_t)(millis() - t0) < 2000; ) delay(10);
 
   // ---- WiFi：静态 IP + 最小自恢复 ----
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);                   // 批次 3：STA + 常驻 SoftAP（AP 常开，见 web_config.h 已记录的口子①）
 
   // 批次 1：设备命名 —— dev = "ESP485-" + MAC 后 6 位十六进制（大写）
   //   例 MAC 48:F6:EE:15:9B:88 -> dev ESP485-159B88；mac 字段保留完整写法
@@ -1150,6 +1187,11 @@ void setup() {
   } else {
     Serial.println("[DEV][WARN] MAC 读取为全 0（WiFi 栈未就绪），将在首次上行前重试");
   }
+
+  // 批次 3：从 NVS 装载运行时配置（无值回落编译期默认）。此刻 WiFi 栈已就绪，macAddress 才有效。
+  loadConfig();
+  kNtpCfg[0] = g_ntpPrimary;                // NTP 主源改为运行时变量（备源 NTP_SERVER_2/3 不变）
+
   WiFi.persistent(true);                   // 凭据持久化到 NVS，掉电后可直接 reconnect
   WiFi.setAutoReconnect(true);             // 协议栈自带重连作为第一道防线
   WiFi.setSleep(false);                    // 关闭 modem sleep，避免延迟抖动放大（任务书 §9.1 M6 前置）
@@ -1159,20 +1201,24 @@ void setup() {
   Serial.printf("[WIFI] 静态配置 IP=%s GW=%s MASK=%s DNS=%s\n",
                 LOCAL_IP, GATEWAY, SUBNET, DNS1);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);    // 非阻塞：连接进度由 wifiTick() 观察
+  WiFi.begin(g_wifiSsid, g_wifiOpen ? (const char *)nullptr : g_wifiPass);
+                                           // 批次 3：凭据来自 NVS（无值回落 secrets.h）；非阻塞，进度由 wifiTick() 观察
   Serial.println("[WIFI] 已发起连接（非阻塞），等待 wifiTick() 报告结果");
+
+  // 批次 3：常驻 SoftAP + Web 配置页 + /status（必须在 WiFi STA 配置之后调用）
+  webSetup();
 
   // ---- NTP：此处【不】调用 configTzTime ----
   // 根因修复：SNTP 依赖已就绪的网络栈。若在 WiFi 连上之前初始化，SNTP 拿不到网络；
   // 现改为由 wifiTick() 在"首次连上 / 重连成功"时置位 g_ntpResyncPending，
   // 再由 ntpTick() 调用 configTzTime（三源：主 校内 chrony -> 备1 公网域名 -> 备2 公网 IP 直连）。
   Serial.printf("[NTP] 三源配置 TZ=%s 主=%s 备1=%s 备2=%s（等 WiFi 连上后由 ntpTick() 触发，setup 不调用 configTzTime）\n",
-                NTP_TZ_INFO, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+                NTP_TZ_INFO, g_ntpPrimary, NTP_SERVER_2, NTP_SERVER_3);
 
-  // ---- UDP：本地端口打开，目标由 config.h 指定 ----
+  // ---- UDP：本地端口打开，目标由运行时配置（NVS，无值回落 config.h 的 UDP_TARGET_IP/PORT）指定 ----
   g_udp.begin(UDP_LOCAL_PORT);
   Serial.printf("[UDP] 本地端口 %u，目标 %s:%u\n",
-                (unsigned)UDP_LOCAL_PORT, UDP_TARGET_IP, (unsigned)UDP_TARGET_PORT);
+                (unsigned)UDP_LOCAL_PORT, g_udpTargetIp, (unsigned)g_udpTargetPort);
 
   // ---- UART1（RS-485 侧）：9600 8N1，begin 形参顺序为 (baud, config, RX, TX) ----
   Serial1.begin(RS485_BAUD, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
@@ -1212,16 +1258,17 @@ void setup() {
     Serial.printf("[485]     S2 寄存器 16->31 请求 %s  期望响应 %u 字节\n", b2, (unsigned)QI_SEG2_RESP_LEN);
     Serial.printf("[485]     S3 寄存器 32->38 请求 %s  期望响应 %u 字节\n", b3, (unsigned)QI_SEG3_RESP_LEN);
     Serial.printf("[485]   3 段一轮段间 >= %lu ms 静默，整轮 %lu ms；合并 %u 字节\n",
-                  (unsigned long)RS485_SEG_GAP_MS, (unsigned long)POLL_INTERVAL_MS, (unsigned)QI_MERGED_LEN);
+                  (unsigned long)RS485_SEG_GAP_MS, (unsigned long)g_pollIntervalMs, (unsigned)QI_MERGED_LEN);
   }
 #endif
 
-  g_nextPollMs = millis() + POLL_INTERVAL_MS;
-  Serial.println("[BOOT] M5+批次1+批次2 就绪：WiFi + NTP + UDP（JSON 上行：每轮 1 行心跳含 mode；全成功再加 1 行数据，含 raw 78 字节 HEX）+ 485 运行时自适应（默认一帧读全，连续失败 3 轮自动降级 3 段）");
+  g_nextPollMs = millis() + g_pollIntervalMs;
+  Serial.println("[BOOT] M5+批次1+批次2+批次3 就绪：WiFi + NTP + UDP（JSON 上行：每轮 1 行心跳含 mode；全成功再加 1 行数据，含 raw 78 字节 HEX）+ 485 运行时自适应（默认一帧读全，连续失败 3 轮自动降级 3 段）+ 常驻 AP/Web 配置页//status/NVS（保存立即生效）");
 }
 
 void loop() {
   wifiTick();     // WiFi 状态检查与节流重连
   ntpTick();      // 对时状态检测 / 重连后重新对时
   stateTick();    // IDLE -> TX -> WAIT_RX -> PARSE -> SEND
+  webTick();      // 批次 3：Web 配置页（非阻塞 handleClient + /reset 延迟重启），不影响 1s 轮询节拍
 }
