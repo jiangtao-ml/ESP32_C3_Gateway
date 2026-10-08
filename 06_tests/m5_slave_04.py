@@ -15,6 +15,16 @@ M5 台面预演 · 电脑端 0x04 真机帧从站模拟器（手写帧组装，�
 用法：
   python m5_slave_04.py COM7               # 接受任意 qty（模拟「真机接受一帧读全」）
   python m5_slave_04.py COM7 --limit16     # qty > 16 → 0x84/0x02（模拟「原文上限 16 属实」）
+  python m5_slave_04.py COM7 --short N     # 每个请求最多只回 N 个寄存器（**短帧**，见下）
+
+--short N（短响应对照从站）用于验证 P0-1「帧长必须与本段请求的寄存器数一致」：
+  它回的帧**自洽**（byte count 与实收长度一致、CRC 正确、地址功能码都对），只与"请求"不符。
+  例：一帧读全要 39 个、--short 30 只回 30 个 ⇒ 固件收到 byteCount=60 / rxLen=65，而本段期望 83。
+  · 判据未生效（P0-1 之前）：该帧被判成功 → 发数据行，且 raw 尾部 18 字节保留**上一轮**残留 ⇒ 静默掺假
+  · 判据生效（P0-1 之后）：`[M4] 帧长与请求不符 期望 83 收到 65（byte count=60）` + 该轮改发 err 行
+  ⚠️ 合成寄存器**每轮不变**，长稳观察时看不出"尾部冻结"；要判"是否掺假"看固件串口那行日志即可。
+  ⚠️ --short 会让连续失败累计到 3 轮且本会话从未成功时触发**自动降级 3 段**（批次 2 既有逻辑）：
+     降级后每段只要 16/16/7 个，30 ≥ 16 ⇒ 又全部成功。这是**预期行为**，不是 bug。
 
 与固件两种编译分支的对应（见操作卡 §5 E-02 决策树）：
   · 默认模式   ← 固件 QI_READ_SPLIT_3SEG = 0，一次发 `01 04 00 00 00 27 B0 10`
@@ -33,6 +43,7 @@ PORT = sys.argv[1] if len(sys.argv) > 1 else "COM7"
 BAUD = 9600
 SLAVE_ID = 1
 LIMIT16 = "--limit16" in sys.argv
+SHORT = int(sys.argv[sys.argv.index("--short") + 1]) if "--short" in sys.argv else None
 
 REQ_LEN = 8          # 0x04 请求固定 8 字节：addr func startH startL qtyH qtyL crcL crcH
 MAX_QTY = 39         # 30001~30039
@@ -130,13 +141,15 @@ def handle(ser: serial.Serial, frame: bytes) -> None:
             stamp(), resp.hex(" ").upper(), qty), flush=True)
         return
 
-    vals = _REGS[start:start + qty]
-    payload = bytes([addr, func, qty * 2]) + b"".join(v.to_bytes(2, "big") for v in vals)
+    qty_ret = qty if SHORT is None else min(qty, SHORT)   # --short N：故意少回，帧仍自洽（P0-1 判据的靶子）
+    vals = _REGS[start:start + qty_ret]
+    payload = bytes([addr, func, qty_ret * 2]) + b"".join(v.to_bytes(2, "big") for v in vals)
     resp = payload + crc16(payload)
     ser.write(resp)
     ser.flush()
-    print("[{}] [slave] TX  {}  （reg[{}..{}] qty={} → 共 {} 字节，期望响应长 {}）".format(
-        stamp(), resp.hex(" ").upper(), start, start + qty - 1, qty, len(resp), 5 + qty * 2), flush=True)
+    tag = "" if qty_ret == qty else "  ★--short：要 {} 只回 {}（byte count={}）".format(qty, qty_ret, qty_ret * 2)
+    print("[{}] [slave] TX  {}  （reg[{}..{}] qty={} → 共 {} 字节，期望响应长 {}{}）".format(
+        stamp(), resp.hex(" ").upper(), start, start + qty_ret - 1, qty, len(resp), 5 + qty * 2, tag), flush=True)
 
 
 def extract(ser: serial.Serial, buf: bytearray) -> None:
@@ -166,7 +179,9 @@ def main() -> None:
     ser = serial.Serial(PORT, BAUD, bytesize=8, parity="N", stopbits=1, timeout=READ_TIMEOUT)
     print("[{}] [slave] 已打开 {} {} 8N1 | SlaveID={} | 模式 = {}".format(
         stamp(), PORT, BAUD, SLAVE_ID,
-        "limit16（qty>16 → 0x84/0x02）" if LIMIT16 else "接受任意 qty（含一帧读全 39）"), flush=True)
+        ("limit16（qty>16 → 0x84/0x02）" if LIMIT16 else "接受任意 qty（含一帧读全 39）")
+        + ("" if SHORT is None else " + **--short {}：每请求最多回 {} 个（短帧，P0-1 靶子）**".format(SHORT, SHORT))),
+        flush=True)
     print("[{}] [slave] 合成寄存器就绪：reg0=0x{:04X}(合闸) reg4={}(50.00Hz) reg8={}(230V) "
           "reg9={}(5.23A) reg37/38={}/{}".format(
               stamp(), _REGS[0], _REGS[4], _REGS[8], _REGS[9], _REGS[37], _REGS[38]), flush=True)
