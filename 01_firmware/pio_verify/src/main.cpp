@@ -19,5 +19,7 @@
  *    让 LDF 从本文件即可发现 WiFi ⇒ 递归发现 Network。与 .ino 重复包含无害
  *    （头文件均有 include guard）。
  */
-#include <WiFi.h>   // LDF 锚点：让 PlatformIO 发现 WiFi 库（进而递归发现 Network）
+#include <WiFi.h>          // LDF 锚点：让 PlatformIO 发现 WiFi 库（进而递归发现 Network）
+#include <WebServer.h>     // 【批次 3 锚点 2026-10-08 砚青】web_config.h 在 src/ 之外，LDF 看不到
+#include <Preferences.h>   // 【批次 3 锚点】NVS 库同理
 #include "../../esp32c3_gateway/esp32c3_gateway.ino"
