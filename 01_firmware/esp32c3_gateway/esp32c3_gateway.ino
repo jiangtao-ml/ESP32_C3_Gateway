@@ -872,7 +872,7 @@ static void logRxHex() {
 }
 
 // ---------------- M5：真实 485 总线 —— Modbus RTU 响应解析 + 3 段记账 ----------------
-// 顺序：超时/半帧 -> 异常响应 -> 地址 -> 功能码 -> byte count 帧长 -> CRC -> 拼接
+// 顺序：超时/半帧 -> 异常响应 -> 地址 -> 功能码 -> byte count 帧长(自洽 + 与请求一致) -> CRC -> 拼接
 // 注：帧长仍按 byte count 动态算（need = rxFrame[2] + 5，对 37/37/19/83 自动成立，P4），
 //     不按段写死 37/19。每段独立校验（P6）；失败原因记入 g_failReason 供 P13 上行。
 static void parseResponse() {
@@ -952,6 +952,27 @@ static void parseResponse() {
     Serial.printf("[M4] 帧长异常 期望 %u 收到 %u（byte count=%u）SEG=%s REQ=0x%02X\n",
                   (unsigned)(byteCount + 5), (unsigned)g_rxLen, (unsigned)byteCount,
                   tag, (unsigned)reqFunc);
+    logRxHex();
+    return;
+  }
+
+  // (5b) 【P0-1 · 2026-10-08】帧长还必须与"本段请求的寄存器数"一致。
+  //   为什么 (5) 不够：(5) 比的是"从站自报的 byte count 与实收长度"——这对**任何**
+  //   自洽的帧都成立（且 ST_WAIT_RX 的帧长驱动正是按同一个 byte count 提前收尾的），
+  //   所以它证明不了"从站真的回满了本段请求的寄存器数"。
+  //   缺这一条时的失效路径（静默掺假）：从站回短帧（例：一帧读全要 39 个、只回 30 个）
+  //   -> CRC 过、地址过、功能码过、(5) 也过 -> 被判为成功 -> (7) 只 memcpy 了前 60 字节
+  //   -> g_merged[60..77] 保留**上一轮**的值（g_merged 只在 (7) 按段偏移覆写、从不整轮清零）
+  //   -> 数据行的 reg30..reg38 是本轮值、reg39 之后是上一轮值，且 quality 可能仍是 OK。
+  //   口径（§4「错误的数据不要」）：短帧 = 本段失败 -> 该轮改发 err 行，不发数据行。
+  //   期望值取 qiActiveRespLens()[g_segIndex] - 5（地址1 + 功能1 + byte count1 + CRC2），
+  //   对 83/37/37/19 自动成立，不新写死常量。
+  //   ⚠️ 本判据只覆盖"正常响应"；从站异常响应（5 字节）已在 (2) 提前 return，不走这里。
+  if ((uint16_t)(byteCount + 5U) != (uint16_t)qiActiveRespLens()[g_segIndex]) {
+    g_statFail++; recordSegFail("LEN");
+    Serial.printf("[M4] 帧长与请求不符 期望 %u 收到 %u（byte count=%u）SEG=%s REQ=0x%02X\n",
+                  (unsigned)qiActiveRespLens()[g_segIndex], (unsigned)g_rxLen,
+                  (unsigned)byteCount, tag, (unsigned)reqFunc);
     logRxHex();
     return;
   }
@@ -1182,7 +1203,16 @@ static void stateTick() {
       }
 #endif
       // 【批次 3.5】LED 状态脉冲：成功轮短亮 / 失败轮长亮（现场免工具判活；WiFi 断开时由 ledTick 慢闪接管）
+      // 【P0-3 · 2026-10-08】本行必须留在守卫内：g_roundFailed 声明在
+      //   #if !RS485_MODE_LOOPBACK_SELFTEST 之内（见上方批次 2 的读取模式状态块），
+      //   若落在守卫外，RS485_MODE_LOOPBACK_SELFTEST=1 的串口层回归分支会编译失败
+      //   （'g_roundFailed' was not declared in this scope，2026-10-08 用户复核确认，
+      //    该分支自批次 3.5 起一直编不过）。回环模式无"段/轮"语义 => 恒视为成功轮、恒短亮。
+#if !RS485_MODE_LOOPBACK_SELFTEST
       ledPulse(g_roundFailed ? LED_POLL_FAIL_MS : LED_POLL_OK_MS);
+#else
+      ledPulse(LED_POLL_OK_MS);            // 回环自测：恒短亮（顺带消掉"ledPulse 定义未使用"警告）
+#endif
       g_nextPollMs += g_pollIntervalMs;    // P9：整轮（三段全结束）后才推进节拍（批次 3：周期为运行时变量，NVS poll_s 可覆盖）
       // 已落后一个周期以上（例如刚重连）就重新对齐，避免补发风暴
       if ((int32_t)(millis() - g_nextPollMs) >= 0) g_nextPollMs = millis() + g_pollIntervalMs;
