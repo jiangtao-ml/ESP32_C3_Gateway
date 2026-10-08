@@ -224,6 +224,44 @@ static bool     g_configured      = false;            // NVS 是否存过任意�
 static bool     g_wifiFromBuiltin = true;             // WiFi 凭据是否来自编译期内置默认（secrets.h）
 
 // ---------------------------------------------------------------
+// 【批次 3.5】LED 状态指示（板载蓝灯 GPIO8，低电平点亮；全 millis() 非阻塞，绝不 delay）
+//   语义见 config.h LED_* 宏注释：WiFi 未连接 = 慢闪；采集成功 = 短亮脉冲；采集失败 = 长亮脉冲。
+//   脉冲与慢闪互斥：WiFi 断开时 sendUdpPayload 不计数不脉冲，慢闪独占；连上后回到脉冲模式。
+// ---------------------------------------------------------------
+static bool     g_ledOn           = false;            // 当前电平（true=亮）；慢闪翻转状态
+static uint32_t g_ledOffAtMs      = 0;                // >0 = 脉冲亮着，到点熄灭
+static uint32_t g_ledNextFlipMs   = 0;                // 慢闪翻转时刻
+
+static void ledPulse(uint32_t ms) {                   // 触发一次"亮 ms 后灭"的脉冲（供 ST_SEND 每轮调用）
+  digitalWrite(LED_PIN, LED_ACTIVE_LOW ? LOW : HIGH);
+  g_ledOn      = true;
+  g_ledOffAtMs = millis() + ms;
+}
+
+static void ledTick() {
+  const uint32_t now = millis();
+  if (g_ledOffAtMs != 0 && (int32_t)(now - g_ledOffAtMs) >= 0) {   // 脉冲到点熄灭
+    digitalWrite(LED_PIN, LED_ACTIVE_LOW ? HIGH : LOW);
+    g_ledOn      = false;
+    g_ledOffAtMs = 0;
+  }
+  if (!g_linkUp) {                                      // WiFi 未连接：慢闪（500ms 翻转）
+    if ((int32_t)(now - g_ledNextFlipMs) >= 0) {
+      g_ledNextFlipMs = now + LED_WIFI_SLOW_MS;
+      g_ledOn = !g_ledOn;
+      digitalWrite(LED_PIN, (g_ledOn != (bool)LED_ACTIVE_LOW) ? LOW : HIGH);
+    }
+  } else {
+    if (g_ledNextFlipMs != 0) {                         // 刚从慢闪切回脉冲模式：先灭灯（避免恢复瞬间常亮）
+      digitalWrite(LED_PIN, LED_ACTIVE_LOW ? HIGH : LOW);
+      g_ledOn          = false;
+      g_ledOffAtMs     = 0;
+      g_ledNextFlipMs  = 0;
+    }
+  }
+}
+
+// ---------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------
 static IPAddress ipFromString(const char *s) {
@@ -1143,6 +1181,8 @@ static void stateTick() {
                       (g_failReason != NULL) ? g_failReason : "LEN");
       }
 #endif
+      // 【批次 3.5】LED 状态脉冲：成功轮短亮 / 失败轮长亮（现场免工具判活；WiFi 断开时由 ledTick 慢闪接管）
+      ledPulse(g_roundFailed ? LED_POLL_FAIL_MS : LED_POLL_OK_MS);
       g_nextPollMs += g_pollIntervalMs;    // P9：整轮（三段全结束）后才推进节拍（批次 3：周期为运行时变量，NVS poll_s 可覆盖）
       // 已落后一个周期以上（例如刚重连）就重新对齐，避免补发风暴
       if ((int32_t)(millis() - g_nextPollMs) >= 0) g_nextPollMs = millis() + g_pollIntervalMs;
@@ -1223,6 +1263,12 @@ void setup() {
   // ---- UART1（RS-485 侧）：9600 8N1，begin 形参顺序为 (baud, config, RX, TX) ----
   Serial1.begin(RS485_BAUD, SERIAL_8N1, RS485_RX_PIN, RS485_TX_PIN);
   Serial1.setTimeout(0);                   // read() 绝不阻塞；超时判定全部交给 millis()
+
+  // 【批次 3.5】板载蓝灯：上电初始灭（脉冲/慢闪均由 ledTick 接管）
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LED_ACTIVE_LOW ? HIGH : LOW);
+  Serial.printf("[LED] 状态灯就绪 GPIO%d（%s 电平点亮）：WiFi 断=慢闪 / 采集成功=短闪 / 失败=长闪\n",
+                (int)LED_PIN, LED_ACTIVE_LOW ? "低" : "高");
 #if RS485_DE_PIN >= 0
   // 方向控制引脚：上电先置于接收态，避免刚上电就占住总线
   pinMode(RS485_DE_PIN, OUTPUT);
@@ -1271,4 +1317,5 @@ void loop() {
   ntpTick();      // 对时状态检测 / 重连后重新对时
   stateTick();    // IDLE -> TX -> WAIT_RX -> PARSE -> SEND
   webTick();      // 批次 3：Web 配置页（非阻塞 handleClient + /reset 延迟重启），不影响 1s 轮询节拍
+  ledTick();      // 批次 3.5：LED 状态指示（非阻塞毫秒翻转），不影响 1s 轮询节拍
 }

@@ -250,3 +250,17 @@
 // /status JSON 缓冲：老师 22 项 + 我方 3 项；最坏约 745 字节（超长 SSID 32B、chrony 47B、5 个计数各 10 位）。
 //   768 仅余 ~23 B 偏紧，取 1024 留余量（snprintf 溢出会显式告警并回 500，绝不静默截断）。
 #define QI_STATUS_JSON_MAX           1024
+
+// -------------------------------------------------------------------
+// 【批次 3.5 · LED 状态指示】板载蓝灯（HW-466AB：GPIO8，低电平点亮）
+//   ⚠️ [待确认] 不同批次 SuperMini 板的 LED 引脚/极性可能不同（另有接 GPIO8 高电平的版本）；
+//      首次上电观察：若闪烁语义相反（常亮=正常），把 LED_ACTIVE_LOW 改 0 即可。
+//   语义（全 millis() 非阻塞翻转，绝不 delay）：
+//     WiFi 未连接        -> 慢闪（半周期 LED_WIFI_SLOW_MS 亮/灭交替）
+//     本轮采集成功       -> 短亮 LED_POLL_OK_MS（每轮脉冲，1s 周期下=每秒轻闪）
+//     本轮采集失败       -> 长亮 LED_POLL_FAIL_MS（现场区分"活着但总线有问题"）
+#define LED_PIN                      8
+#define LED_ACTIVE_LOW               1
+#define LED_POLL_OK_MS               30
+#define LED_POLL_FAIL_MS             200
+#define LED_WIFI_SLOW_MS             500
