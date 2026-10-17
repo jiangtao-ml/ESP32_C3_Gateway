@@ -14,10 +14,10 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 ## 1. 脚本一览
 
 > **目录约定（2026-10-17 起）**：活跃脚本放本目录；**已证伪 / 已作废**的资产移入 `_archive/`，只作证据保留、不参与任何流程。
-> 计划新增（M7）：`udp_collect.py` —— 168h 连续采集接收端，设计见 `02_docs/22` §2。
 
 | 脚本 | 用途 | 典型用法 |
 | --- | --- | --- |
+| **`udp_collect.py`** | **168h 连续采集接收端（M7 验收主工具）**：3 线程（收包 / 落库 / 统计）+ 2 队列；WAL SQLite 六表；`udp_packet` 存**原始包**（不可再生）、`meter_record` 存解析结果（可重放）。报告**全部由 SQL 重算**，`--report-only` 与运行时报告**逐字节一致**（已实测 md5 相同）。**带统计引擎自检**：构造数据集注入四类丢包 / 重启 / 重包 / 时钟回跳，逐项比对 | `python udp_collect.py --db 03_logs\run168.db`<br>`… --hours 0.5`（30 min 冒烟）<br>`… --db <库> --report-only`（验收复算）<br>`… --selftest`（不需设备）<br>`… --repair`（断电补解析） |
 | **`udp_listen.py`** | **PC 侧 UDP 接收监听**：确认 ESP32 上行数据**真的到达电脑**。⚠️ 串口报「发送成功」≠ 数据送达（UDP 无连接，目标不存在可能静默丢弃）⇒ **必须两侧同时看** | `python udp_listen.py 8888 120` |
 | **`ntp_verify.py`** | **NTP 三源改造烧录验收**：抓 ESP32 启动日志，自动判定三源配置 / 时区 / 同步，并回答核心问题「实际生效源是内网 `172.16.0.2` 还是落到公网备源」；**含"判定过早"与"走兜底分支"的自动识别** | `python ntp_verify.py COM5 80` |
 | **`ntp_probe.py`** | **NTP 可达性探针**：查某 NTP 源是否真的在应答（UDP/123）、stratum、往返延迟、与本地钟偏差。改 ESP32 的 NTP 源之前**必须先跑它** | `python ntp_probe.py 172.16.0.2 ntp.aliyun.com` |
@@ -113,6 +113,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 版本 | 日期 | 作者 | 变更内容 |
 | --- | --- | --- | --- |
+| v1.11 | 2026-10-17 | 砚青 | 新增 **`udp_collect.py`**（168h 连续采集接收端，承接 `02_docs/22` §2 的设计）。落地时发现并修正方案里三处与固件实际行为不符的口径：① `2·ΔR` 只在该 `QI_SEND_ERR_ROW=1` 时成立，须实测推断；② hb 的 `udp_tx` 是**发送前**的值，窗口内发出行数 = `Δudp_tx+1`；③ 世代首轮无差分可依，须看 `seq_first+1` 的 ptype 归属，否则 M1 系统性少 1。另实测到一个**既有 schema 限制**：`meter_record` 主键为秒级 `collect_time`，1 Hz 下同秒两轮会顶掉一行（原始包未丢，主键加宽后可 `--repair` 重放）。 |
 | v1.10 | 2026-10-17 | 砚青 | **结构整理**：`usb485_loopback.py` 与 `M4_重测操作卡.md` 移入 `_archive/`（含归档说明 README）；§1 补目录约定与 M7 计划项 `udp_collect.py`。触发：用户要求整理项目结构。 |
 | v1.9 | 2026-10-08 | WorkBuddy | 新增 **`m5_slave_04.py --short N`**（短响应对照从站：帧自洽但与请求不符，用于验证 P0-1「帧长必须与本段请求的寄存器数一致」）；§1 该脚本行与 §3.3 判定口径表补对应条目。触发：P0-1 需要一个能**稳定复现短帧**的对手端，而原脚本只会回满/回异常码，做不出短帧。 |
 | v1.8 | 2026-10-06 | WorkBuddy | ① 新增 **`db_proto.py`**（数据落库原型：解析 → 四层校验 → 打标 → 幂等入库；字典驱动、保留 raw_hex；**把"型号已知不上报字段"与"本次异常"分开**）与 **`db_schema.sql`**（生成的建表 DDL）；② 配套新增字段字典 **`05_hardware/STB3-125_字段字典.csv`**（39 行，**唯一事实来源**，`m5_parse.py` 与 `db_proto.py` 共用其口径）。实测：真机抓包 59 条全部入库且 `quality=OK`；同数据二次入库 **7→7 新增 0 行**（幂等成立）。 |
