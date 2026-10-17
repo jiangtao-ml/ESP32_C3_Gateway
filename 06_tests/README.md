@@ -13,6 +13,9 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 ## 1. 脚本一览
 
+> **目录约定（2026-10-17 起）**：活跃脚本放本目录；**已证伪 / 已作废**的资产移入 `_archive/`，只作证据保留、不参与任何流程。
+> 计划新增（M7）：`udp_collect.py` —— 168h 连续采集接收端，设计见 `02_docs/22` §2。
+
 | 脚本 | 用途 | 典型用法 |
 | --- | --- | --- |
 | **`udp_listen.py`** | **PC 侧 UDP 接收监听**：确认 ESP32 上行数据**真的到达电脑**。⚠️ 串口报「发送成功」≠ 数据送达（UDP 无连接，目标不存在可能静默丢弃）⇒ **必须两侧同时看** | `python udp_listen.py 8888 120` |
@@ -29,7 +32,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 | `bus_sniff.py` | 485 总线**只读**监听（不发送，不会与从站争抢总线） | `python bus_sniff.py COM7 30` |
 | `bus_probe_tx.py` | 单向注入探针（用于分离"去程 / 回程"） | `python bus_probe_tx.py COM7 55 200 45` |
 | `serial_capture.py` | ESP32 串口抓取（替代人工复制串口监视器输出） | `python serial_capture.py COM5 115200 30` |
-| ⚠️ `usb485_loopback.py` | **单端口 A/B 短接自环 —— 已证无效，仅留档，勿再使用** | 见 §3 |
+| ⚠️ `_archive/usb485_loopback.py` | **单端口 A/B 短接自环 —— 已证无效，已移入归档区，勿使用** | 见 §3.1 与 `_archive/README.md` |
 
 ### `m4_accept.py` 的五段档位（按从站收到的请求序号）
 
@@ -55,7 +58,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 | --- | --- |
 | **`M5_真机联调操作卡.md`** | **M5 现场操作卡（现行版）**：**§0b 台面预演（接真机前必走）**、**§0c 无 USB 转 485 / 无串口时的现场单**、上电前安全项、接线差异、帧清单（CRC 已独立复核）、E-02 决策树、代码改动清单、四步执行与判据、失败速查、换算速查、现场记录表 |
 | **`M4_从零重建分步指南.md`** | M4 现场操作卡：五步、每步带判据与失败处置，含正确的 `TXD`/`RXD` 交叉接线表（**M4 已通过，留作回归参考**） |
-| ⚠️ `M4_重测操作卡.md` | **已作废**（第 0 步为无效的 A/B 自环；接线表为"同名对接"，是错的）。仅留档，见文件头作废说明 |
+| ⚠️ `_archive/M4_重测操作卡.md` | **已作废**（第 0 步为无效的 A/B 自环；接线表为"同名对接"，是错的）。已移入归档区，原因见 `_archive/README.md` |
 | `README.md` | 本索引 |
 
 ---
@@ -110,6 +113,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 版本 | 日期 | 作者 | 变更内容 |
 | --- | --- | --- | --- |
+| v1.10 | 2026-10-17 | 砚青 | **结构整理**：`usb485_loopback.py` 与 `M4_重测操作卡.md` 移入 `_archive/`（含归档说明 README）；§1 补目录约定与 M7 计划项 `udp_collect.py`。触发：用户要求整理项目结构。 |
 | v1.9 | 2026-10-08 | WorkBuddy | 新增 **`m5_slave_04.py --short N`**（短响应对照从站：帧自洽但与请求不符，用于验证 P0-1「帧长必须与本段请求的寄存器数一致」）；§1 该脚本行与 §3.3 判定口径表补对应条目。触发：P0-1 需要一个能**稳定复现短帧**的对手端，而原脚本只会回满/回异常码，做不出短帧。 |
 | v1.8 | 2026-10-06 | WorkBuddy | ① 新增 **`db_proto.py`**（数据落库原型：解析 → 四层校验 → 打标 → 幂等入库；字典驱动、保留 raw_hex；**把"型号已知不上报字段"与"本次异常"分开**）与 **`db_schema.sql`**（生成的建表 DDL）；② 配套新增字段字典 **`05_hardware/STB3-125_字段字典.csv`**（39 行，**唯一事实来源**，`m5_parse.py` 与 `db_proto.py` 共用其口径）。实测：真机抓包 59 条全部入库且 `quality=OK`；同数据二次入库 **7→7 新增 0 行**（幂等成立）。 |
 | v1.7 | 2026-10-05 | WorkBuddy | §2 的 M5 操作卡条目补 **§0c**（无 USB 转 485 / 无串口时的现场单）。触发：现场实际为「有充电宝、无 USB 转 485、真机 A/B 已接且带电」⇒ 台面预演跳过，运行期改为只看 UDP。 |

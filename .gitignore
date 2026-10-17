@@ -55,6 +55,7 @@ venv/
 logs/
 03_logs/*
 !03_logs/.gitkeep
+!03_logs/README.md
 
 # ---------------------------------------------------------------
 # IDE / editor configuration
