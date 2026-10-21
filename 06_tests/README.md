@@ -17,7 +17,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 脚本 | 用途 | 典型用法 |
 | --- | --- | --- |
-| **`udp_collect.py`** | **168h 连续采集接收端（M7 验收主工具）**：3 线程（收包 / 落库 / 统计）+ 2 队列；WAL SQLite 六表；`udp_packet` 存**原始包**（不可再生）、`meter_record` 存解析结果（可重放）。报告**全部由 SQL 重算**，`--report-only` 与运行时报告**逐字节一致**（已实测 md5 相同）。**带统计引擎自检**：构造数据集注入四类丢包 / 重启 / 重包 / 时钟回跳，逐项比对 | `python udp_collect.py --db 03_logs\run168.db`<br>`… --hours 0.5`（30 min 冒烟）<br>`… --db <库> --report-only`（验收复算）<br>`… --selftest`（不需设备）<br>`… --repair`（断电补解析） |
+| **`udp_collect.py`** | **168h 连续采集接收端（M7 验收主工具）**：3 线程（收包 / 落库 / 统计）+ 2 队列；WAL SQLite 六表；`udp_packet` 存**原始包**（不可再生）、`meter_record` 存解析结果（可重放）。报告**全部由 SQL 重算**，`--report-only` 与运行时报告**逐字节一致**。含统计引擎自检、环境自检、raw 自校验、每日在线备份；Linux 侧采 `/proc/net/snmp` 与网卡计数作为「接收端丢包」的硬证据。**已移植到 Ubuntu**（SIGTERM 收尾、`SO_RCVBUF` 回读、LF 报告） | `python udp_collect.py --db 03_logs\m7_longrun_<日期>.db`<br>`… --env-check`（开跑前）<br>`… --hours 0.5`（30 min 冒烟）<br>`… --report-only --report-out x.txt`（验收复算）<br>`… --selftest`（不需设备）<br>`… --verify-raw`（raw 重算比对） |
 | **`udp_listen.py`** | **PC 侧 UDP 接收监听**：确认 ESP32 上行数据**真的到达电脑**。⚠️ 串口报「发送成功」≠ 数据送达（UDP 无连接，目标不存在可能静默丢弃）⇒ **必须两侧同时看** | `python udp_listen.py 8888 120` |
 | **`ntp_verify.py`** | **NTP 三源改造烧录验收**：抓 ESP32 启动日志，自动判定三源配置 / 时区 / 同步，并回答核心问题「实际生效源是内网 `172.16.0.2` 还是落到公网备源」；**含"判定过早"与"走兜底分支"的自动识别** | `python ntp_verify.py COM5 80` |
 | **`ntp_probe.py`** | **NTP 可达性探针**：查某 NTP 源是否真的在应答（UDP/123）、stratum、往返延迟、与本地钟偏差。改 ESP32 的 NTP 源之前**必须先跑它** | `python ntp_probe.py 172.16.0.2 ntp.aliyun.com` |
@@ -113,6 +113,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 版本 | 日期 | 作者 | 变更内容 |
 | --- | --- | --- | --- |
+| v1.12 | 2026-10-21 | 砚青 | **`udp_collect.py` 修 3 个会静默失效的 bug 并移植 Ubuntu**：统计线程误用只读连接（快照/告警写不进去且被吞）、续跑 naive/aware 不一致致 T3 `TypeError`、无 SIGTERM 收尾。新增 `--env-check` / `--verify-raw` / `--report-out` / `--bin`，`SO_RCVBUF` 回读、内核与网卡丢包采样、每日备份、报告固定 LF。触发：168h 要在 Ubuntu 旧机上跑。 |
 | v1.11 | 2026-10-17 | 砚青 | 新增 **`udp_collect.py`**（168h 连续采集接收端，承接 `02_docs/22` §2 的设计）。落地时发现并修正方案里三处与固件实际行为不符的口径：① `2·ΔR` 只在该 `QI_SEND_ERR_ROW=1` 时成立，须实测推断；② hb 的 `udp_tx` 是**发送前**的值，窗口内发出行数 = `Δudp_tx+1`；③ 世代首轮无差分可依，须看 `seq_first+1` 的 ptype 归属，否则 M1 系统性少 1。另实测到一个**既有 schema 限制**：`meter_record` 主键为秒级 `collect_time`，1 Hz 下同秒两轮会顶掉一行（原始包未丢，主键加宽后可 `--repair` 重放）。 |
 | v1.10 | 2026-10-17 | 砚青 | **结构整理**：`usb485_loopback.py` 与 `M4_重测操作卡.md` 移入 `_archive/`（含归档说明 README）；§1 补目录约定与 M7 计划项 `udp_collect.py`。触发：用户要求整理项目结构。 |
 | v1.9 | 2026-10-08 | WorkBuddy | 新增 **`m5_slave_04.py --short N`**（短响应对照从站：帧自洽但与请求不符，用于验证 P0-1「帧长必须与本段请求的寄存器数一致」）；§1 该脚本行与 §3.3 判定口径表补对应条目。触发：P0-1 需要一个能**稳定复现短帧**的对手端，而原脚本只会回满/回异常码，做不出短帧。 |

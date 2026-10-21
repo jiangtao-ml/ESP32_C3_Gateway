@@ -60,12 +60,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import logging.handlers
 import os
+import platform
 import queue
 import shutil
+import signal
 import socket
 import sqlite3
 import sys
@@ -99,6 +102,8 @@ COMMIT_SECS = 2.0              # 提交策略三条件之一
 COMMIT_ROWS = 500
 COMMIT_IDLE_S = 1.0
 CHECKPOINT_SECS = 6 * 3600     # 每 6h TRUNCATE 一次 WAL
+BACKUP_INTERVAL_S = 24 * 3600  # 每天一份在线备份（VACUUM INTO 的等价物）
+BACKUP_KEEP = 3
 DISK_LOW_GB = 10.0
 
 # 该型号恒不上报的字段（raw 恒 0 ⇒ 恰为量程下限 -40 ℃ 的"无数据"伪装）
@@ -224,15 +229,29 @@ CREATE INDEX IF NOT EXISTS idx_pkt_type    ON udp_packet(ptype, recv_mono);
 CREATE INDEX IF NOT EXISTS idx_pkt_epoch   ON udp_packet(epoch_id, seq);
 
 -- ② 采集会话（一次长跑一行；重启不新建，靠 ingest_cursor.run_id 认领）
+--   2026-10-21 增列：主机/环境指纹 + bin/代码版本 + 收缓冲实测 + 收信号时刻。
+--   全部走 init_schema 的幂等 ALTER，旧库可平滑升级、不重建表。
 CREATE TABLE IF NOT EXISTS collect_run (
-    run_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at   TEXT,
-    planned_end  TEXT,
-    ended_at     TEXT,
-    target_hours REAL DEFAULT 168,
-    period_ms    INTEGER DEFAULT 1000,
-    bin_sha256   TEXT,
-    note         TEXT
+    run_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at    TEXT,
+    planned_end   TEXT,
+    ended_at      TEXT,
+    stop_signal_at TEXT,              -- 收到 SIGTERM/Ctrl+C 的时刻（时长以它为准）
+    target_hours  REAL DEFAULT 168,
+    period_ms     INTEGER DEFAULT 1000,
+    bin_sha256    TEXT,
+    fw_ver        TEXT,
+    code_commit   TEXT,
+    pc_host       TEXT,
+    pc_ip         TEXT,
+    os_info       TEXT,
+    py_ver        TEXT,
+    sqlite_ver    TEXT,
+    rcvbuf_req    INTEGER,            -- 请求的 SO_RCVBUF
+    rcvbuf_act    INTEGER,            -- ****回读值****（Linux 会静默截断到 rmem_max）
+    rmem_max      INTEGER,
+    starts        INTEGER DEFAULT 0,  -- 进程启动次数（每次启动 +1；>1 说明中途重启过）
+    note          TEXT
 );
 
 -- ③ 设备启动世代：seq 回退 + poll 计数回退即切世代。
@@ -273,7 +292,23 @@ CREATE TABLE IF NOT EXISTS stat_snapshot (
     rssi             INTEGER,
     free_heap        INTEGER,
     db_mb            REAL,
-    disk_free_mb     REAL
+    disk_free_mb     REAL,
+    -- 2026-10-21 增列：接收端自身与内核的丢包证据。
+    -- ⚠️ 这几列是"缺口归因"的**唯一**依据：没有 RcvbufErrors/rx_dropped，
+    --    就永远分不清"空口丢"与"接收端丢"，只能记 UNATTRIBUTED。
+    rcvbuf_act       INTEGER,
+    rmem_max         INTEGER,
+    udp_in_errors    INTEGER,
+    udp_rcvbuf_errors INTEGER,
+    nic_rx_dropped   INTEGER,
+    nic_rx_missed    INTEGER,
+    cpu_pct          REAL,
+    rss_mb           REAL,
+    q_depth_max      INTEGER,
+    raw_checked      INTEGER,
+    raw_bad          INTEGER,
+    fw_quality_ok    INTEGER,
+    fw_quality_mismatch INTEGER
 );
 
 -- ⑤ 断点游标
@@ -330,8 +365,16 @@ def open_db(db_path: str, readonly: bool = False) -> sqlite3.Connection:
     return conn
 
 
+def _ensure_columns(conn: sqlite3.Connection, table: str, cols: list) -> None:
+    """幂等补列。**不重建表**——168h 长跑到一半重启也要能平滑升级。"""
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(%s)" % table)}
+    for name, decl in cols:
+        if name not in have:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
+
+
 def init_schema(conn: sqlite3.Connection, fields) -> None:
-    """建表 + 给 meter_record 补 epoch_id（ALTER 幂等）。"""
+    """建表 + 补列 + 给 meter_record 加 epoch_id（全部幂等）。"""
     conn.executescript(DDL_EXTRA)
     conn.executescript(db_proto.build_ddl(fields))
 
@@ -344,6 +387,23 @@ def init_schema(conn: sqlite3.Connection, fields) -> None:
                  "ON meter_record(device_id, epoch_id, seq)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_meter_epoch "
                  "ON meter_record(epoch_id, seq)")
+
+    # 2026-10-21 新增列（旧库平滑升级）
+    _ensure_columns(conn, "collect_run", [
+        ("stop_signal_at", "TEXT"), ("fw_ver", "TEXT"), ("code_commit", "TEXT"),
+        ("pc_host", "TEXT"), ("pc_ip", "TEXT"), ("os_info", "TEXT"),
+        ("py_ver", "TEXT"), ("sqlite_ver", "TEXT"),
+        ("rcvbuf_req", "INTEGER"), ("rcvbuf_act", "INTEGER"), ("rmem_max", "INTEGER"),
+        ("starts", "INTEGER DEFAULT 0"),
+    ])
+    _ensure_columns(conn, "stat_snapshot", [
+        ("rcvbuf_act", "INTEGER"), ("rmem_max", "INTEGER"),
+        ("udp_in_errors", "INTEGER"), ("udp_rcvbuf_errors", "INTEGER"),
+        ("nic_rx_dropped", "INTEGER"), ("nic_rx_missed", "INTEGER"),
+        ("cpu_pct", "REAL"), ("rss_mb", "REAL"), ("q_depth_max", "INTEGER"),
+        ("raw_checked", "INTEGER"), ("raw_bad", "INTEGER"),
+        ("fw_quality_ok", "INTEGER"), ("fw_quality_mismatch", "INTEGER"),
+    ])
     conn.commit()
 
 
@@ -610,6 +670,8 @@ class Receiver(threading.Thread):
         self.anomalies = deque(maxlen=200)   # T3 负责落库/写日志
         self.sock = None
         self.fatal = None
+        self.rcvbuf_req = 0
+        self.rcvbuf_act = 0
 
     def run(self) -> None:
         try:
@@ -648,14 +710,25 @@ class Receiver(threading.Thread):
 
     def _open(self) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # SO_RCVBUF 必须在 bind 之前设；Windows 默认 64 KB ≈ 29 s 缓冲，
-        # 一次 checkpoint 就能填满，之后内核静默丢包。
+        # SO_RCVBUF 必须在 bind 之前设。Windows 默认 64 KB ≈ 29 s 缓冲；
+        # Linux 则会把请求值**静默截断**到 net.core.rmem_max（Ubuntu 默认 212992）。
+        req = 1024 * 1024
         try:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, req)
         except OSError:
-            pass
+            req = 0
+        # 必须回读：截断不报错，只看代码看不出来，而它直接决定"一次 WAL checkpoint
+        # 期间会不会内核静默丢包"。回读值会进日志、进 collect_run、进报告封面。
+        try:
+            act = s.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+        except OSError:
+            act = 0
+        self.rcvbuf_req, self.rcvbuf_act = req, act
+        self.st.set(rcvbuf_req=req, rcvbuf_act=act, rmem_max=read_rmem_max())
         # Windows 专属：SO_REUSEADDR 允许第二个进程**静默抢包**；
         # SO_EXCLUSIVEADDRUSE 反过来，端口被占时直接 bind 失败（我们要的就是这个）。
+        # Linux 无此常量（hasattr 为 False，静默跳过即可）：默认不开 SO_REUSEADDR 时
+        # 第二次 bind 就返回 EADDRINUSE，效果等价；本程序也从不设 SO_REUSEPORT。
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             try:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -971,10 +1044,150 @@ class Writer(threading.Thread):
                           "%s（seq=%s）" % (quality, seq))
 
 
+# ---------------------------------------------------------------- 环境与内核采样
+
+def sha256_file(path: str) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except (OSError, TypeError):
+        return None
+
+
+def host_info() -> dict:
+    """主机指纹。报告封面要用，且**必须落库**——否则 `--report-only` 在另一台机器
+    上重算时，封面会随机器变化，"逐字节一致"就永远不成立。"""
+    ip = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 53))      # 不真正发包，只为让内核选出口地址
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        ip = None
+    return {
+        "pc_host": socket.gethostname(),
+        "pc_ip": ip,
+        "os_info": "%s %s" % (platform.system(), platform.release()),
+        "py_ver": platform.python_version(),
+        "sqlite_ver": sqlite3.sqlite_version,
+    }
+
+
+def read_rmem_max():
+    try:
+        with open("/proc/sys/net/core/rmem_max", "r") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_udp_snmp():
+    """`/proc/net/snmp` 的 Udp 段 → InDatagrams / InErrors / RcvbufErrors。
+
+    ⚠️ 必须按**表头名**取值，不能按固定下标：不同内核版本列序变过。
+    这是 Linux 独有的证据源 —— 应用层看不到"内核已经丢了"的那部分包。
+    """
+    try:
+        with open("/proc/net/snmp", "r") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    hdr = vals = None
+    for i, ln in enumerate(lines):
+        if ln.startswith("Udp:") and i + 1 < len(lines):
+            if hdr is None:
+                hdr = ln[4:].split()
+                vals = lines[i + 1][4:].split()
+                break
+    if not hdr or not vals or len(hdr) != len(vals):
+        return None
+    d = dict(zip(hdr, vals))
+    out = {}
+    for key, name in (("InDatagrams", "in_dgrams"), ("InErrors", "in_errors"),
+                      ("RcvbufErrors", "rcvbuf_errors"), ("NoPorts", "no_ports")):
+        try:
+            out[name] = int(d[key])
+        except (KeyError, ValueError):
+            out[name] = None
+    return out
+
+
+def read_nic_drops():
+    """所有非 lo 网卡的 rx_dropped + rx_missed_errors 之和（取不到返 None）。"""
+    base = "/sys/class/net"
+    try:
+        ifaces = [n for n in os.listdir(base) if n != "lo"]
+    except OSError:
+        return None, None
+    dropped = missed = 0
+    seen = False
+    for n in ifaces:
+        for fname, acc in (("rx_dropped", "d"), ("rx_missed_errors", "m")):
+            try:
+                with open(os.path.join(base, n, "statistics", fname)) as f:
+                    v = int(f.read().strip())
+                seen = True
+                if acc == "d":
+                    dropped += v
+                else:
+                    missed += v
+            except (OSError, ValueError):
+                continue
+    return (dropped, missed) if seen else (None, None)
+
+
+class SelfSampler:
+    """自身 CPU% 与 RSS。老机器上 p99 偏高时，这两个数是唯一能自证"不是我拖的"的证据。"""
+
+    def __init__(self) -> None:
+        self.prev = self._read_ticks()
+
+    @staticmethod
+    def _read_ticks():
+        try:
+            with open("/proc/self/stat", "r") as f:
+                parts = f.read().split()
+            # utime=14, stime=15（1-based，从 comm 之后算）
+            return int(parts[13]) + int(parts[14]), os.sysconf("SC_CLK_TCK")
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def cpu_pct(self) -> float | None:
+        cur = self._read_ticks()
+        prev, self.prev = self.prev, cur
+        if not prev or not cur or prev[1] == 0:
+            return None
+        return round(100.0 * (cur[0] - prev[0]) / cur[1] / max(SNAP_INTERVAL_S, 1), 2)
+
+    @staticmethod
+    def rss_mb() -> float | None:
+        try:
+            with open("/proc/self/status", "r") as f:
+                for ln in f:
+                    if ln.startswith("VmRSS:"):
+                        return round(int(ln.split()[1]) / 1024.0, 1)
+        except (OSError, ValueError, IndexError):
+            pass
+        return None
+
+
 # ---------------------------------------------------------------- T3 统计线程
 
 class StatReporter(threading.Thread):
-    """只读连接；10 s 控制台一行、60 s 分钟快照 + 磁盘检查。"""
+    """统计线程：10 s 控制台一行、60 s 分钟快照 + 磁盘检查 + 内核丢包采样。
+
+    ⚠️ **连接必须是读写（2026-10-21 修）**：本线程要写 `stat_snapshot` 与 `event_log`
+    （GAP / DISK_LOW / 内核丢包），早期版本用 `readonly=True` 打开，两条路
+    （`mode=ro` 与 `PRAGMA query_only=ON`）都禁止写，异常又被 `except sqlite3.Error: pass`
+    吞掉 —— 结果是**分钟快照与全部告警静默为空，而报告看起来一切正常**。
+    写频率仅 1 次/分钟，WAL + `busy_timeout=10000` 与 T2 的 2 s 提交不会打架。
+    """
 
     def __init__(self, db_path: str, stats: Stats, q_pkt: queue.Queue, stop: threading.Event,
                  receiver: Receiver, writer: "Writer", run_id: int, started: datetime,
@@ -992,15 +1205,21 @@ class StatReporter(threading.Thread):
         self.lg = lg
         self.deadline = started + timedelta(hours=hours)
         self._last_snap = 0.0
+        self._last_backup = 0.0
+        self._sampler = SelfSampler()
+        self._q_depth_max = 0
+        self._snmp_prev = None
+        self._snmp_warned = 0
+        self._disk_warned = 0
+        self._snap_err = 0
 
     def run(self) -> None:
-        # 必须等写入端把 WAL 的 -shm 建好，再开只读连接（见 Writer.run 的写探测注释）
         if not self.writer.ready.wait(timeout=15.0):
-            self.lg.warning("[T3] 写入端未就绪，仍尝试打开只读连接")
+            self.lg.warning("[T3] 写入端未就绪，仍尝试连接")
         try:
-            conn = open_db(self.db_path, readonly=True)
+            conn = open_db(self.db_path)
         except sqlite3.Error as e:
-            self.lg.error("[T3] 只读连接失败（不影响采集）：%s", e)
+            self.lg.error("[T3] 数据库连接失败（不影响采集）：%s", e)
             conn = None
         t0 = time.monotonic()
         try:
@@ -1026,6 +1245,9 @@ class StatReporter(threading.Thread):
                 if elapsed - self._last_snap >= SNAP_INTERVAL_S:
                     self._last_snap = elapsed
                     self._snapshot(conn, s)
+                if elapsed - self._last_backup >= BACKUP_INTERVAL_S:
+                    self._last_backup = elapsed
+                    self._backup(conn)
                 if datetime.now(CST) >= self.deadline:
                     self.lg.info("[RUN] 已达到计划时长 %.2f h，开始收尾", self.hours)
                     self.stop.set()
@@ -1052,7 +1274,11 @@ class StatReporter(threading.Thread):
         self.lg.info(line)
 
     def _drain_anomalies(self, conn) -> None:
-        """T1 攒的异常在这里落地 —— 顺带满足"T1 不做文件 I/O"的约束。"""
+        """T1 攒的异常在这里落地 —— 顺带满足"T1 不做文件 I/O"的约束。
+
+        写库失败**不再静默吞掉**：捞不到 `event_log` 就等于缺口归因没有证据，
+        必须让人在日志里看见。
+        """
         r = self.receiver
         while r.anomalies:
             try:
@@ -1065,8 +1291,55 @@ class StatReporter(threading.Thread):
                     log_event(conn, datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
                               kind, sev, detail[:800])
                     conn.commit()
-                except sqlite3.Error:
+                except sqlite3.Error as e:
+                    if self._snap_err < 3:
+                        self._snap_err += 1
+                        self.lg.error("[T3] 事件写入失败：%s", e)
+
+    def _backup(self, conn) -> None:
+        """每天一份在线备份 + SHA256，保留最近 3 份。
+
+        用 `Connection.backup()` 而不是 `VACUUM INTO`：后者要 SQLite ≥3.27，
+        而 Ubuntu 18.04 只到 3.22；`backup()` 在所有版本都对，且不长时间持锁。
+        备份失败**绝不能影响主库**，只记事件。
+        """
+        if conn is None:
+            return
+        base = os.path.splitext(os.path.basename(self.db_path))[0]
+        bdir = os.path.join(os.path.dirname(self.db_path), base + "_backup")
+        try:
+            os.makedirs(bdir, exist_ok=True)
+            dst = os.path.join(bdir, "%s_%s.db" % (base, datetime.now(CST).strftime("%Y%m%d")))
+            tmp = dst + ".part"
+            dconn = sqlite3.connect(tmp)
+            try:
+                conn.backup(dconn)
+            finally:
+                dconn.close()
+            os.replace(tmp, dst)
+            h = sha256_file(dst)
+            with open(dst + ".sha256", "w", encoding="utf-8", newline="\n") as f:
+                f.write("%s  %s\n" % (h, os.path.basename(dst)))
+            # 只留最近 N 份
+            olds = sorted((os.path.join(bdir, n) for n in os.listdir(bdir)
+                           if n.endswith(".db")), key=os.path.getmtime)
+            for p in olds[:-BACKUP_KEEP]:
+                try:
+                    os.remove(p)
+                    for ext in (".sha256",):
+                        if os.path.exists(p + ext):
+                            os.remove(p + ext)
+                except OSError:
                     pass
+            self.lg.info("[BACKUP] 已备份 %s（%s）", os.path.basename(dst), (h or "?")[:16])
+        except (sqlite3.Error, OSError) as e:
+            self.lg.error("[BACKUP] 备份失败（不影响主库）：%s", e)
+            try:
+                log_event(conn, datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
+                          "BACKUP_FAIL", "WARN", str(e)[:300])
+                conn.commit()
+            except sqlite3.Error:
+                pass
 
     def _snapshot(self, conn, s: dict) -> None:
         if conn is None:
@@ -1076,25 +1349,58 @@ class StatReporter(threading.Thread):
             free_gb = du.free / (1024 ** 3)
             db_mb = (os.path.getsize(self.db_path) / (1024 ** 2)
                      if os.path.exists(self.db_path) else 0.0)
+            wal = self.db_path + "-wal"
+            if os.path.exists(wal):
+                db_mb += os.path.getsize(wal) / (1024 ** 2)   # WAL 最多 64 MB，别漏算
             self.st.set(last_db_mb=db_mb)
-            if free_gb < DISK_LOW_GB:
-                self.lg.error("[ALERT] 磁盘剩余 %.1f GB < %.0f GB（DISK_LOW）", free_gb, DISK_LOW_GB)
-                try:
+
+            snmp = read_udp_snmp()
+            nd, nm = read_nic_drops()
+            cpu = self._sampler.cpu_pct()
+            rss = self._sampler.rss_mb()
+            qmax = self.q_pkt.qsize()
+            if qmax > self._q_depth_max:
+                self._q_depth_max = qmax
+
+            # 内核丢包增量 >0 是**接收端问题**的硬证据，必须立刻告警（只报一次，
+            # 避免每分钟刷屏；数值本身仍逐分钟入库，便于算区间增量）。
+            if snmp and self._snmp_prev:
+                d_rb = (snmp["rcvbuf_errors"] or 0) - (self._snmp_prev["rcvbuf_errors"] or 0)
+                d_ie = (snmp["in_errors"] or 0) - (self._snmp_prev["in_errors"] or 0)
+                if (d_rb > 0 or d_ie > 0) and self._snmp_warned < 3:
+                    self._snmp_warned += 1
+                    self.lg.error("[ALERT] 内核 UDP 丢包：RcvbufErrors +%d / InErrors +%d "
+                                  "（这是接收端缓冲不足，不是空口丢包）", d_rb, d_ie)
                     log_event(conn, datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
-                              "DISK_LOW", "ALERT", "剩余 %.1f GB" % free_gb)
-                except sqlite3.Error:
-                    pass
+                              "KERNEL_DROP", "ALERT",
+                              "RcvbufErrors+%d InErrors+%d" % (d_rb, d_ie))
+            self._snmp_prev = snmp
+
+            if free_gb < DISK_LOW_GB and self._disk_warned < 3:
+                self._disk_warned += 1
+                self.lg.error("[ALERT] 磁盘剩余 %.1f GB < %.0f GB（DISK_LOW）", free_gb, DISK_LOW_GB)
+                log_event(conn, datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"),
+                          "DISK_LOW", "ALERT", "剩余 %.1f GB" % free_gb)
+
             conn.execute(
                 "INSERT OR REPLACE INTO stat_snapshot (ts,run_id,device_id,pkt_rx,data_rx,hb_rx,"
                 "err_rx,seq_last,q_depth,q_drop,poll_ok_last,poll_err_last,udp_tx_last,rssi,"
-                "free_heap,db_mb,disk_free_mb) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "free_heap,db_mb,disk_free_mb,rcvbuf_act,rmem_max,udp_in_errors,"
+                "udp_rcvbuf_errors,nic_rx_dropped,nic_rx_missed,cpu_pct,rss_mb,q_depth_max) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"), self.run_id, None,
                  s["rx"], s["rx_data"], s["rx_hb"], s["rx_err"], s["last_seq"],
                  self.q_pkt.qsize(), s["q_drop"], s["last_poll_ok"], s["last_poll_err"],
-                 s["last_udp_tx"], s["last_rssi"], s["last_heap"], db_mb, free_gb * 1024))
+                 s["last_udp_tx"], s["last_rssi"], s["last_heap"], db_mb, free_gb * 1024,
+                 s.get("rcvbuf_act"), s.get("rmem_max"),
+                 (snmp or {}).get("in_errors"), (snmp or {}).get("rcvbuf_errors"),
+                 nd, nm, cpu, rss, self._q_depth_max))
             conn.commit()
         except (sqlite3.Error, OSError) as e:
-            self.lg.warning("[T3] 快照写入失败：%s", e)
+            # 不静默：快照写不进去 = 报告第 7 章会空白，必须让人看见
+            if self._snap_err < 3:
+                self._snap_err += 1
+                self.lg.error("[T3] 快照写入失败（第 %d 次）：%s", self._snap_err, e)
 
 
 # ---------------------------------------------------------------- 统计引擎
@@ -1107,6 +1413,15 @@ def _pct(a, b, digits: int = 4):
 
 def _fmt(v, spec: str = "%.4f", na: str = "[待实测]") -> str:
     return na if v is None else (spec % v)
+
+
+def _sql1(conn, sql):
+    """取单个标量。列不存在（旧库没升级）时返回 None，不抛异常。"""
+    try:
+        r = conn.execute(sql).fetchone()
+        return r[0] if r else None
+    except sqlite3.Error:
+        return None
 
 
 def infer_err_row_mode(conn) -> bool:
@@ -1348,7 +1663,12 @@ def build_report(conn: sqlite3.Connection, fields, db_path: str = "",
         run = conn.execute("SELECT * FROM collect_run ORDER BY run_id DESC LIMIT 1").fetchone()
 
     started = run["started_at"] if run else None
-    ended = run["ended_at"] if run and run["ended_at"] else None
+    # 时长以**收到停止信号的时刻**为准，不用 ended_at：
+    # ended_at 是排空队列、checkpoint、写报告之后才写的，30 min 冒烟里
+    # 收尾能花 2 min，直接拿它算时长会把 M2 拉低约 6.7%，属于自己制造的门控失败。
+    ended = None
+    if run:
+        ended = run["stop_signal_at"] or run["ended_at"]
     if ended is None:
         row = conn.execute("SELECT MAX(recv_time) m FROM udp_packet").fetchone()
         ended = row["m"] if row else None
@@ -1356,8 +1676,7 @@ def build_report(conn: sqlite3.Connection, fields, db_path: str = "",
     dur_s = 0.0
     if started and ended:
         try:
-            dur_s = (datetime.strptime(ended, "%Y-%m-%d %H:%M:%S")
-                     - datetime.strptime(started, "%Y-%m-%d %H:%M:%S")).total_seconds()
+            dur_s = (_parse_wall(ended) - _parse_wall(started)).total_seconds()
         except ValueError:
             dur_s = 0.0
     hours = dur_s / 3600.0 if dur_s else 0.0
@@ -1380,7 +1699,23 @@ def build_report(conn: sqlite3.Connection, fields, db_path: str = "",
     _th = run["target_hours"] if run else HOURS_168
     w("  计划：%s h%s" % (("%.1f" % _th) if _th >= 1 else ("%.2f" % _th),
                           "" if hours else "（未完成）"))
-    w("  主机：%s" % os.environ.get("COMPUTERNAME", "?"))
+    # 主机与版本一律从库里读，不读运行时环境 —— 否则 --report-only 换台机器重算，
+    # 封面就跟着变，"逐字节一致"永远不成立。
+    w("  主机：%s (%s)  %s" % (run["pc_host"] if run else "?",
+                              run["pc_ip"] if run else "?", run["os_info"] if run else "?"))
+    w("  运行时：Python %s / SQLite %s" % (run["py_ver"] if run else "?",
+                                          run["sqlite_ver"] if run else "?"))
+    w("  固件：ver=%s  bin_sha256=%s" % (run["fw_ver"] if run and run["fw_ver"] else "[未提供]",
+                                       run["bin_sha256"] if run and run["bin_sha256"] else "[未提供]"))
+    w("  代码：commit=%s" % (run["code_commit"] if run and run["code_commit"] else "[未提供]"))
+    w("  启动次数：%s（>1 说明中途重启过）" % (run["starts"] if run else "?"))
+    _req = run["rcvbuf_req"] if run else None
+    _act = run["rcvbuf_act"] if run else None
+    _rm = run["rmem_max"] if run else None
+    if _req:
+        w("  收缓冲：请求 %d B → 实际 %d B（%.0f%%，rmem_max=%s）⇒ 约 %.0f 秒"
+          % (_req, _act or 0, 100.0 * (_act or 0) / _req, _rm, (_act or 0) / 1150.0))
+    w("  时区：全部时间为 UTC+8（固定，与本机 tz 无关）")
     w("")
 
     # ---------------- 总量 ----------------
@@ -1530,6 +1865,31 @@ def build_report(conn: sqlite3.Connection, fields, db_path: str = "",
     w("  乱序到达 %d 次（后到的那条未覆盖，原始包仍在 udp_packet）" % tooo)
     w("  quality 冲突 %d（quality=OK 但 invalid 非空 ⇒ 固件口径 bug 证据）" % qconf)
 
+    # ---------------- 接收端健康（缺口归因的证据链） ----------------
+    w("")
+    w("【6b】接收端健康与内核丢包（缺这一章，就分不清“空口丢”与“接收端丢”）")
+    w("-" * 78)
+    w("  q_drop（队列溢出）%d  |  q_depth_max %s  |  进程启动次数 %s"
+      % (conn.execute("SELECT COALESCE(MAX(q_drop),0) m FROM stat_snapshot").fetchone()["m"],
+         _sql1(conn, "SELECT MAX(q_depth_max) m FROM stat_snapshot"),
+         run["starts"] if run else "?"))
+    w("  CPU%% p95 %s  |  RSS max %s MB  |  DB %s MB"
+      % (_fmt(_sql1(conn, "SELECT MAX(cpu_pct) m FROM stat_snapshot"), "%.1f"),
+         _fmt(_sql1(conn, "SELECT MAX(rss_mb) m FROM stat_snapshot"), "%.1f"),
+         _fmt(db_mb, "%.1f")))
+    w("  内核 UDP InErrors=%s  RcvbufErrors=%s  ← **>0 即接收端缓冲不足，不是空口丢包**"
+      % (_sql1(conn, "SELECT MAX(udp_in_errors) m FROM stat_snapshot"),
+         _sql1(conn, "SELECT MAX(udp_rcvbuf_errors) m FROM stat_snapshot")))
+    w("  网卡 rx_dropped=%s  rx_missed_errors=%s"
+      % (_sql1(conn, "SELECT MAX(nic_rx_dropped) m FROM stat_snapshot"),
+         _sql1(conn, "SELECT MAX(nic_rx_missed) m FROM stat_snapshot")))
+    w("  磁盘最低余量 %s MB  |  快照行数 %d（0 = 统计线程没写出东西，必须排查）"
+      % (_fmt(_sql1(conn, "SELECT MIN(disk_free_mb) m FROM stat_snapshot"), "%.0f"),
+         conn.execute("SELECT COUNT(*) c FROM stat_snapshot").fetchone()["c"]))
+    _rw = conn.execute("SELECT detail FROM event_log WHERE kind='RAW_CHECK' "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    w("  raw 自校验（收尾抽样）：%s" % (_rw["detail"] if _rw else "未执行"))
+
     # ---------------- 抖动 ----------------
     w("")
     w("【7】周期抖动（只用 hb 行，同类型之间比较才有意义）")
@@ -1610,6 +1970,64 @@ def build_report(conn: sqlite3.Connection, fields, db_path: str = "",
 
 
 # ---------------------------------------------------------------- 修复
+
+def verify_raw(conn, fields, limit: int = 0, out_csv: str | None = None,
+               lg: logging.Logger | None = None) -> tuple:
+    """用 `raw` 重算 39 字段，与 JSON 里的工程量逐字段比对。→ (checked, bad, samples)
+
+    ⚠️ **必须比 JSON，不能比 `meter_record`**：后者本来就是由 raw 重算出来的，
+    自己跟自己比必然 100% 相等 —— 那是同义反复，不是校验。
+
+    容差按字段小数位取半个最小刻度（固件用 `%.Nf` 打印，四舍五入造成的末位差
+    属正常）。比较对象只含数值型字段；`openState`/`record*` 是字符串，单独比。
+    """
+    rows = conn.execute(
+        "SELECT seq, payload FROM udp_packet WHERE ptype='data' AND parse_status='ok' "
+        "AND payload IS NOT NULL ORDER BY id" + (" LIMIT %d" % limit if limit else "")
+    ).fetchall()
+    checked = bad = 0
+    samples = []
+    for r in rows:
+        try:
+            obj = json.loads(bytes(r["payload"]).decode("utf-8", "replace"))
+            hexs = (obj.get("raw") or "").split()
+            if len(hexs) != RAW_BYTES:
+                continue
+            regs = db_proto.bytes_to_regs(hexs)
+            vals, _invalid, _known = db_proto.decode(regs, fields, KNOWN_MISSING)
+        except (ValueError, KeyError, IndexError):
+            continue
+        checked += 1
+        for f in fields:
+            name, dec = f["field"], f["decimals"]
+            want = vals.get(name)
+            got = obj.get(name)
+            if want is None or got is None:
+                continue
+            if isinstance(want, str) or isinstance(got, str):
+                if str(got) != str(want):
+                    bad += 1
+                    if len(samples) < 50:
+                        samples.append((r["seq"], name, got, want, "str"))
+                continue
+            try:
+                tol = 0.5 * (10 ** -dec) * 1.01
+                if abs(float(got) - float(want)) > tol:
+                    bad += 1
+                    if len(samples) < 50:
+                        samples.append((r["seq"], name, got, want, "%.1e" % (float(got) - float(want))))
+            except (TypeError, ValueError):
+                continue
+    if out_csv:
+        with open(out_csv, "w", encoding="utf-8", newline="\n") as f:
+            f.write("seq,field,json_value,raw_value,delta\n")
+            for s in samples:
+                f.write("%s,%s,%s,%s,%s\n" % s)
+    if lg:
+        lg.info("[RAW] 校验 %d 行 / 39 字段，不一致 %d 处%s",
+                checked, bad, ("（样例见 %s）" % out_csv) if out_csv else "")
+    return checked, bad, samples
+
 
 def repair(conn, fields, lg) -> int:
     """对 parse_status='ok' 但 meter_record 缺行的数据包补入库（断电恢复）。
@@ -1816,6 +2234,37 @@ def selftest() -> int:
     check("CLOCK_STEP 事件数", tc, 1)
     check("TS_SAME_SECOND 事件数", ts_n, 1)
 
+    # ---- B-2 回归：续跑必须拿回 aware datetime ----
+    rid2, st2 = ensure_run(conn, 168)
+    check("续跑 run_id 不变", rid2, rid)
+    check("续跑 started 带时区", st2.tzinfo is not None, True)
+    check("续跑 started 与库一致", st2.strftime("%Y-%m-%d %H:%M:%S"),
+          conn.execute("SELECT started_at FROM collect_run WHERE run_id=?", (rid,)
+                       ).fetchone()[0])
+    # 这条比较就是当初 T3 崩掉的那一句，必须能跑通
+    try:
+        _ = datetime.now(CST) >= (st2 + timedelta(hours=168))
+        check("续跑 deadline 可比", True, True)
+    except TypeError:
+        check("续跑 deadline 可比", False, True)
+
+    # ---- B-1 回归：统计线程必须能写（只读连接写不进去）----
+    conn.execute("INSERT OR REPLACE INTO stat_snapshot (ts,run_id,pkt_rx) VALUES (?,?,?)",
+                 ("2026-10-01 00:00:00", rid, 1))
+    conn.commit()
+    check("stat_snapshot 可写", conn.execute(
+        "SELECT COUNT(*) c FROM stat_snapshot").fetchone()["c"], 1)
+    ro = open_db(db_path, readonly=True)
+    wrote = True
+    try:
+        ro.execute("INSERT INTO stat_snapshot (ts,run_id) VALUES ('x',1)")
+        ro.commit()
+    except sqlite3.Error:
+        wrote = False
+    finally:
+        ro.close()
+    check("只读连接确实写不进去", wrote, False)
+
     print("=" * 66)
     print("udp_collect 统计引擎自检")
     print("=" * 66)
@@ -1847,13 +2296,25 @@ def selftest() -> int:
 
 # ---------------------------------------------------------------- 主流程
 
+def _parse_wall(s: str) -> datetime:
+    """库内时间文本 → **带时区** datetime。
+
+    ⚠️ 必须显式 `replace(tzinfo=CST)`：`strptime` 出来的是 naive，
+    而新建会话那条路径用的是 `datetime.now(CST)`（aware）。早期版本续跑时
+    前者、新建时后者，T3 拿它算 `deadline` 再与 aware 的 `now(CST)` 比较
+    ⇒ **`TypeError: can't compare offset-naive and offset-aware datetimes`**，
+    统计线程静默死亡，168h 永不到点收尾。
+    """
+    return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=CST)
+
+
 def ensure_run(conn, hours: float) -> tuple:
-    """认领或新建采集会话。重启不新建（§2.6）。"""
+    """认领或新建采集会话。重启不新建（§2.6）。返回值恒为 aware datetime。"""
     rid = cursor_get(conn, "run_id")
     if rid:
         row = conn.execute("SELECT * FROM collect_run WHERE run_id=?", (int(rid),)).fetchone()
         if row and row["started_at"]:
-            return row["run_id"], datetime.strptime(row["started_at"], "%Y-%m-%d %H:%M:%S")
+            return row["run_id"], _parse_wall(row["started_at"])
     started = datetime.now(CST).replace(microsecond=0)
     planned = (started + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.execute("INSERT INTO collect_run (started_at,planned_end,target_hours,period_ms) "
@@ -1865,6 +2326,107 @@ def ensure_run(conn, hours: float) -> tuple:
     return rid, started
 
 
+def git_commit() -> str | None:
+    """读 .git 取当前 commit。不走 subprocess —— 旧机器上 git 可能没装。"""
+    gitdir = os.path.join(db_proto.ROOT, ".git")
+    try:
+        with open(os.path.join(gitdir, "HEAD"), "r") as f:
+            head = f.read().strip()
+        if head.startswith("ref:"):
+            with open(os.path.join(gitdir, head[4:].strip()), "r") as f:
+                return f.read().strip()
+        return head
+    except OSError:
+        return None
+
+
+def env_check(db_path: str, port: int) -> tuple:
+    """长跑环境自检。→ (硬项失败列表, 软项提示列表)
+
+    硬项失败必须**当场退出**：带着一个不合格的环境跑 168h，等于把 7 天
+    浪费在一个已知会失败的前提上。软项只提示，不阻断。
+    """
+    hard, soft = [], []
+    d = os.path.dirname(os.path.abspath(db_path)) or "."
+
+    if sys.version_info < (3, 8):
+        hard.append("Python %s < 3.8" % platform.python_version())
+    else:
+        soft.append("Python %s" % platform.python_version())
+
+    sv = sqlite3.sqlite_version_info
+    if sv < (3, 24):
+        hard.append("SQLite %s < 3.24（ON CONFLICT DO UPDATE 不支持；"
+                    "Ubuntu 18.04 自带 3.22 ⇒ 必须换机或升级）" % sqlite3.sqlite_version)
+    elif sv < (3, 25):
+        soft.append("SQLite %s（可用，但报告里的窗口函数需要 ≥3.25）" % sqlite3.sqlite_version)
+    else:
+        soft.append("SQLite %s" % sqlite3.sqlite_version)
+
+    try:
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, ".write_probe")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+    except OSError as e:
+        hard.append("目标目录不可写：%s（%s）" % (d, e))
+
+    try:
+        du = shutil.disk_usage(d)
+        free_gb = du.free / (1024 ** 3)
+        if free_gb < 20:
+            hard.append("磁盘剩余 %.1f GB < 20 GB（168h 预计 1.0–1.5 GB，但需留备份余量）"
+                        % free_gb)
+        else:
+            soft.append("磁盘剩余 %.1f GB" % free_gb)
+    except OSError:
+        pass
+
+    try:
+        fs = None
+        with open("/proc/mounts", "r") as f:
+            best = ""
+            for ln in f:
+                parts = ln.split()
+                if len(parts) >= 3 and d.startswith(parts[1]) and len(parts[1]) > len(best):
+                    best, fs = parts[1], parts[2]
+        if fs and fs.lower() in ("nfs", "nfs4", "cifs", "smbfs", "vfat", "msdos", "fuseblk"):
+            hard.append("DB 所在文件系统是 %s —— WAL 的共享内存与锁不可靠，"
+                        "会报 disk I/O error。必须放本机 ext4/xfs。" % fs)
+        elif fs:
+            soft.append("文件系统 %s" % fs)
+    except OSError:
+        pass
+
+    try:
+        db_proto.load_dict()
+        soft.append("字段字典 OK（39 行）")
+    except (SystemExit, OSError) as e:
+        hard.append("字段字典不可读：%s（必须保留 06_tests/ 与 05_hardware/ 的相对层级）" % e)
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.bind(("0.0.0.0", port))
+            soft.append("UDP %d 空闲" % port)
+        finally:
+            s.close()
+    except OSError as e:
+        hard.append("UDP %d 已被占用：%s（先查 `ss -lunp | grep %d`）" % (port, e, port))
+
+    rm = read_rmem_max()
+    if rm is None:
+        soft.append("rmem_max 读取失败（非 Linux？收缓冲回读值以实际为准）")
+    else:
+        soft.append("net.core.rmem_max = %d（%.0f KB ⇒ 约 %.0f 秒缓冲）"
+                    % (rm, rm / 1024.0, rm / 1150.0))
+
+    snmp = read_udp_snmp()
+    soft.append("内核 UDP 计数器可读" if snmp else "内核 UDP 计数器不可读（缺口归因会缺证据）")
+    return hard, soft
+
+
 def main(argv=None) -> int:
     _fix_console()
     ap = argparse.ArgumentParser(
@@ -1874,8 +2436,14 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=8888, help="UDP 监听端口，默认 8888")
     ap.add_argument("--hours", type=float, default=HOURS_168, help="计划时长（小时），默认 168")
     ap.add_argument("--report-only", action="store_true", help="只重算报告（验收复算）")
+    ap.add_argument("--report-out", default=None, help="把报告写到指定文件（LF 行尾）")
     ap.add_argument("--repair", action="store_true", help="补解析缺行")
     ap.add_argument("--selftest", action="store_true", help="统计引擎自检（不需要设备）")
+    ap.add_argument("--env-check", action="store_true", help="环境自检后退出（可作 ExecStartPre）")
+    ap.add_argument("--verify-raw", action="store_true",
+                    help="用 raw 重算 39 字段与 JSON 比对，写 <db>_rawcheck.csv 后退出")
+    ap.add_argument("--bin", dest="bin_path", default=None, help="固件 bin 路径，用于记录 SHA256")
+    ap.add_argument("--fw-ver", default=None, help="固件版本标识（写入 collect_run）")
     ap.add_argument("--key-hex", default=None, help="AES-128-GCM 密钥（32 位 hex）")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -1888,6 +2456,25 @@ def main(argv=None) -> int:
     if d:
         os.makedirs(d, exist_ok=True)
     lg = setup_logging(db_path, args.verbose)
+
+    if args.env_check:
+        hard, soft = env_check(db_path, args.port)
+        print("环境自检")
+        print("-" * 60)
+        for s in soft:
+            print("  [信息] " + s)
+        for h in hard:
+            print("  [阻断] " + h)
+        print("-" * 60)
+        print("结论：%s" % ("不通过（%d 项阻断）" % len(hard) if hard else "通过"))
+        return 1 if hard else 0
+
+    # SQLite 版本闸门：宁可现在退，也不要跑到一半才发现 UPSERT 不支持
+    if sqlite3.sqlite_version_info < (3, 24):
+        lg.error("SQLite %s < 3.24，本程序依赖 ON CONFLICT DO UPDATE。请先 `--env-check` 排查。",
+                 sqlite3.sqlite_version)
+        return 2
+
     fields = db_proto.load_dict()
 
     if args.report_only:
@@ -1895,8 +2482,14 @@ def main(argv=None) -> int:
             lg.error("库不存在：%s", db_path)
             return 2
         conn = open_db(db_path, readonly=True)
-        print(build_report(conn, fields, db_path))
+        text = build_report(conn, fields, db_path)
         conn.close()
+        # 固定 LF：Windows 的 CRLF 会让"跨机逐字节一致"这条验收永远失败
+        if args.report_out:
+            with open(args.report_out, "w", encoding="utf-8", newline="\n") as f:
+                f.write(text + "\n")
+            lg.info("报告已写入 %s", args.report_out)
+        sys.stdout.write(text + "\n")
         return 0
 
     key = bytes.fromhex(args.key_hex) if args.key_hex else None
@@ -1907,26 +2500,68 @@ def main(argv=None) -> int:
     conn = open_db(db_path)
     init_schema(conn, fields)
     run_id, started = ensure_run(conn, args.hours)
+
+    # 运行元数据：每次启动都刷新，但**不覆盖** started_at（§2.6 续跑语义）
+    hi = host_info()
+    conn.execute(
+        "UPDATE collect_run SET starts=COALESCE(starts,0)+1, pc_host=?, pc_ip=?, os_info=?,"
+        " py_ver=?, sqlite_ver=?, code_commit=?, fw_ver=COALESCE(?,fw_ver),"
+        " bin_sha256=COALESCE(?,bin_sha256) WHERE run_id=?",
+        (hi["pc_host"], hi["pc_ip"], hi["os_info"], hi["py_ver"], hi["sqlite_ver"],
+         git_commit(), args.fw_ver, sha256_file(args.bin_path) if args.bin_path else None,
+         run_id))
+    conn.commit()
+    run_meta = conn.execute("SELECT * FROM collect_run WHERE run_id=?", (run_id,)).fetchone()
+
     if args.repair:
         n = repair(conn, fields, lg)
         lg.info("[REPAIR] 补入库 %d 行", n)
         conn.close()
         return 0
 
-    lg.info("=" * 70)
+    if args.verify_raw:
+        out = os.path.splitext(db_path)[0] + "_rawcheck.csv"
+        checked, bad, _ = verify_raw(conn, fields, 0, out, lg)
+        conn.close()
+        print("raw 自校验：%d 行，不一致 %d 处 → %s" % (checked, bad, out))
+        return 0
+
+    lg.info("=" * 74)
     lg.info("udp_collect 启动")
     lg.info("  库      %s", db_path)
-    lg.info("  端口    UDP %d（SO_RCVBUF 1 MiB + SO_EXCLUSIVEADDRUSE）", args.port)
-    lg.info("  会话    run_id=%d  起于 %s  计划 %.1f h", run_id,
-            started.strftime("%Y-%m-%d %H:%M:%S"), args.hours)
+    lg.info("  端口    UDP %d", args.port)
+    lg.info("  会话    run_id=%d  起于 %s  计划 %.1f h  第 %s 次启动",
+            run_id, started.strftime("%Y-%m-%d %H:%M:%S"), args.hours,
+            run_meta["starts"])
+    lg.info("  主机    %s (%s)  %s", hi["pc_host"], hi["pc_ip"], hi["os_info"])
+    lg.info("  运行时  Python %s / SQLite %s", hi["py_ver"], hi["sqlite_ver"])
+    lg.info("  固件    ver=%s  bin_sha256=%s", run_meta["fw_ver"] or "[未提供]",
+            (run_meta["bin_sha256"] or "[未提供]")[:16])
+    lg.info("  代码    commit=%s", (run_meta["code_commit"] or "[未提供]")[:12])
     lg.info("  字段    %d 个（已知不上报：%s）", len(fields), ",".join(sorted(KNOWN_MISSING)))
     lg.info("  加密    %s", "AES-128-GCM（密钥已载入）" if key else "关闭")
-    lg.info("=" * 70)
+    lg.info("=" * 74)
     conn.close()
 
     stats = Stats()
     q_pkt: queue.Queue = queue.Queue(maxsize=Q_MAX)
     stop = threading.Event()
+    stopped = {"at": None}
+
+    def _on_signal(signum, frame):
+        # ⚠️ 只置标志：handler 里零 I/O、零日志、零 join。
+        #    `systemctl stop` 发的是 SIGTERM，早期版本只捕 KeyboardInterrupt，
+        #    进程被直接杀死 ⇒ 排空、ended_at、checkpoint、报告全部跳过。
+        if stopped["at"] is None:
+            stopped["at"] = datetime.now(CST)
+        stop.set()
+
+    for sig in (getattr(signal, "SIGTERM", None), getattr(signal, "SIGINT", None)):
+        if sig is not None:
+            try:
+                signal.signal(sig, _on_signal)
+            except (ValueError, OSError):
+                pass   # 非主线程 / 平台不支持
 
     rx = Receiver(args.port, q_pkt, stats, stop, key, lg)
     dbw = Writer(db_path, q_pkt, stats, stop, fields, run_id, lg)
@@ -1941,17 +2576,45 @@ def main(argv=None) -> int:
     if rx.fatal is not None:
         return 3
 
+    # 收缓冲的**实际**值必须写进日志：Linux 会把请求值静默截断到 rmem_max，
+    # 而这个数直接决定"一次 checkpoint 期间会不会内核丢包"。
+    eff_s = (rx.rcvbuf_act / 1150.0) if rx.rcvbuf_act else 0.0
+    lg.info("[SOCK] SO_RCVBUF 请求 %d B → 回读 %d B（rmem_max=%s）⇒ 约 %.0f 秒缓冲",
+            rx.rcvbuf_req, rx.rcvbuf_act, read_rmem_max(), eff_s)
+    if rx.rcvbuf_req and rx.rcvbuf_act < rx.rcvbuf_req * 0.9:
+        lg.warning("[SOCK] 收缓冲被系统截断到 %.0f%%（Linux 正常行为，取决于 net.core.rmem_max）。"
+                   "1 Hz 下 %.0f 秒缓冲够用；若想按设计值拿满，"
+                   "在有 sudo 的机器上设 net.core.rmem_max=4194304。",
+                   100.0 * rx.rcvbuf_act / max(rx.rcvbuf_req, 1), eff_s)
+
+    # 回读值必须落库：它只能在 socket 打开之后才有，所以不能跟其它元数据一起写。
+    # 报告封面、`--report-only` 复算都从库里读这个数，不能依赖运行时变量。
+    try:
+        _c = open_db(db_path)
+        _c.execute("UPDATE collect_run SET rcvbuf_req=?, rcvbuf_act=?, rmem_max=? "
+                   "WHERE run_id=?", (rx.rcvbuf_req, rx.rcvbuf_act, read_rmem_max(), run_id))
+        _c.commit()
+        _c.close()
+    except sqlite3.Error as e:
+        lg.warning("[SOCK] 收缓冲回读值写库失败：%s", e)
+
     dbw.start()
     sta.start()
 
-    try:
-        while not stop.is_set():
-            stop.wait(1.0)
-    except KeyboardInterrupt:
-        lg.info("\n[RUN] 收到 Ctrl+C，开始收尾")
-        stop.set()
+    while not stop.is_set():
+        stop.wait(1.0)
+
+    if stopped["at"] is None:
+        stopped["at"] = datetime.now(CST)
+    lg.info("\n[RUN] 开始收尾（%.1f h 计划，信号于 %s）", args.hours,
+            stopped["at"].strftime("%H:%M:%S"))
 
     # 收尾：关 socket → 排空队列 → 最后 commit → checkpoint → 报告
+    try:
+        if rx.sock is not None:
+            rx.sock.close()
+    except OSError:
+        pass
     q_pkt.put(None)          # 唤醒 T2 走退出分支
     dbw.join(timeout=120)
     sta.join(timeout=10)
@@ -1960,12 +2623,24 @@ def main(argv=None) -> int:
 
     conn = open_db(db_path)
     ended = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute("UPDATE collect_run SET ended_at=? WHERE run_id=?", (ended, run_id))
+    # stop_signal_at 与 ended_at 分开记：end - start 才是"跑多久"，
+    # ended - stop_signal 是"收尾花了多久"。混在一起会让短测的 M2 数值无端变小。
+    conn.execute("UPDATE collect_run SET ended_at=?, stop_signal_at=? WHERE run_id=?",
+                 (ended, stopped["at"].strftime("%Y-%m-%d %H:%M:%S"), run_id))
     conn.commit()
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     except sqlite3.Error:
         pass
+    # 收尾自校验（抽样 2000 行）：给报告一条独立的"字段可信度"证据链。
+    # 失败不影响报告生成 —— 这是校验，不是前置条件。
+    try:
+        _ck, _bd, _ = verify_raw(conn, fields, 2000, None, lg)
+        log_event(conn, datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"), "RAW_CHECK",
+                  "INFO" if _bd == 0 else "WARN", "checked=%d bad=%d" % (_ck, _bd))
+        conn.commit()
+    except (sqlite3.Error, OSError) as e:
+        lg.warning("[RAW] 收尾自校验失败：%s", e)
     report = build_report(conn, fields, db_path, run_id)
     conn.close()
 
@@ -1978,11 +2653,14 @@ def main(argv=None) -> int:
                   + "!" * 78 + "\n\n" + report)
 
     rp = os.path.splitext(db_path)[0] + "_report.txt"
-    # 默认 newline=None："\n" 会按 os.linesep 写成 CRLF，与 `print` 重定向到文件的
-    # 结果一致 —— 否则 --report-only 与运行时报告会因行尾差异 diff 全红。
-    with open(rp, "w", encoding="utf-8") as f:
+    # 固定 LF（newline="\n"）：跨机复算必须逐字节一致，os.linesep 的 CRLF 会让
+    # diff 全红，被误判成"复算不一致"。
+    with open(rp, "w", encoding="utf-8", newline="\n") as f:
         f.write(report + "\n")
-    print(report)
+    if args.report_out:
+        with open(args.report_out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(report + "\n")
+    sys.stdout.write(report + "\n")
     lg.info("[RUN] 报告已写入 %s", rp)
     return 0 if dbw.fatal is None else 4
 

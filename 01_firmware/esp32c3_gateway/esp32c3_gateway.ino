@@ -687,6 +687,17 @@ static bool buildDataJson(const char *ts, bool tsOk) {
   char rawHex[QI_RAW_HEX_MAX];
   bytesToHex(g_merged, QI_MERGED_LEN, rawHex, sizeof(rawHex));
 
+  // 【2026-10-21 加固】原来这里写 `WiFi.localIP().toString().c_str()`：
+  //   每轮每条数据行都会构造/析构一个 String（实测堆锯齿 356/712 B）。
+  //   168h 长跑最怕的就是这种"每秒一次"的堆抖动把碎片攒起来。改成栈上定长缓冲，
+  //   JSON 里的 ip 字符串逐字节不变（格式仍是 a.b.c.d）。
+  char ipBuf[16];
+  {
+    const IPAddress ip = WiFi.localIP();
+    snprintf(ipBuf, sizeof(ipBuf), "%u.%u.%u.%u",
+             (unsigned)ip[0], (unsigned)ip[1], (unsigned)ip[2], (unsigned)ip[3]);
+  }
+
   size_t pos   = 0;
   bool   trunc = false;
   ++g_seq;                                    // 每发一行自增 1（uint32_t 回绕正常）
@@ -694,7 +705,7 @@ static bool buildDataJson(const char *ts, bool tsOk) {
   appendf(g_payload, sizeof(g_payload), &pos, &trunc,
           "{\"seq\":%lu,\"dev\":\"%s\",\"mac\":\"%s\",\"ip\":\"%s\",\"ts\":\"%s\",\"ts_ok\":%s,",
           (unsigned long)g_seq, g_devStr, g_macStr,
-          WiFi.localIP().toString().c_str(), ts, tsOk ? "true" : "false");
+          ipBuf, ts, tsOk ? "true" : "false");
 
   appendf(g_payload, sizeof(g_payload), &pos, &trunc,
           "\"openState\":\"%04X\",\"record1\":\"%04X\",\"record2\":\"%04X\",\"record3\":\"%04X\","
@@ -768,12 +779,22 @@ static bool buildErrJson(const char *ts, bool tsOk) {
 }
 #endif
 
-// 把 g_payload 中已组装好的一行发出去；成功（beginPacket / endPacket 都返回 1）则累加 udp_tx
+// 把 g_payload 中已组装好的一行发出去；成功（beginPacket / write / endPacket 全部正确）则累加 udp_tx
 static bool udpSendLine() {
+  const size_t want = strlen(g_payload);
   bool ok = (g_udp.beginPacket(g_udpTargetIp, g_udpTargetPort) == 1);   // 不判返回值会让日志说谎：发失败仍打印"已发"
   if (ok) {
-    g_udp.write((const uint8_t *)g_payload, strlen(g_payload));
-    ok = (g_udp.endPacket() == 1);
+    // 【2026-10-21 加固】必须核对 write() 的返回值。短写时 endPacket() 仍可能返回 1，
+    //   那样 g_udpTx 会记成"已发"而实际只发出一行的一部分 —— 接收端只会看到
+    //   bad_json，对账时却被算进"网络丢失"，把排查方向整条带偏。
+    //   ⚠️ 这里**绝不重传**：重传会产生重复 seq，直接污染重包率(M8)。
+    //   endPacket() 必须无条件调用（`&&` 左操作数先求值），否则 pbuf 泄漏。
+    const size_t wrote = g_udp.write((const uint8_t *)g_payload, want);
+    ok = (g_udp.endPacket() == 1) && (wrote == want);
+    if (ok == false && wrote != want) {
+      Serial.printf("[UDP][ERR] 短写：want=%u wrote=%u（本行未计入 udp_tx）\n",
+                    (unsigned)want, (unsigned)wrote);
+    }
   }
   if (ok) {
     g_udpTx++;
@@ -781,7 +802,9 @@ static bool udpSendLine() {
     Serial.printf("[UDP][ERR] 发送失败（beginPacket/endPacket 未返回 1），目标 %s:%u\n",
                   g_udpTargetIp, (unsigned)g_udpTargetPort);
   }
+#if SERIAL_VERBOSE_ROUND
   Serial.printf("[UDP -> %s:%u] %s\n", g_udpTargetIp, (unsigned)g_udpTargetPort, g_payload);
+#endif
   return ok;
 }
 
@@ -1003,6 +1026,7 @@ static void parseResponse() {
   recordSegOk();
 
   g_statOk++;
+#if SERIAL_VERBOSE_ROUND
   char dataHex[3 * MODBUS_RX_BUF_MAX + 1];
   bytesToHex(g_rxFrame + 3, byteCount, dataHex, sizeof(dataHex));
   Serial.printf("[M4] 解析 OK ADDR=%u FUNC=0x%02X DATA=%s SEG=%s REQ=0x%02X\n",
@@ -1015,6 +1039,7 @@ static void parseResponse() {
     }
     Serial.printf("  CRC=%04X\n", (unsigned)crcRecv);
   }
+#endif  // SERIAL_VERBOSE_ROUND
 }
 #else
 // ---------------- M3 式物理回环自测（RS485_MODE_LOOPBACK_SELFTEST = 1） ----------------
@@ -1215,7 +1240,14 @@ static void stateTick() {
 #endif
       g_nextPollMs += g_pollIntervalMs;    // P9：整轮（三段全结束）后才推进节拍（批次 3：周期为运行时变量，NVS poll_s 可覆盖）
       // 已落后一个周期以上（例如刚重连）就重新对齐，避免补发风暴
-      if ((int32_t)(millis() - g_nextPollMs) >= 0) g_nextPollMs = millis() + g_pollIntervalMs;
+      // 【2026-10-21 加固】这条分支原来**完全静默**：168h 对账时会出现
+      //   "墙钟应有 N 轮、poll 只涨了 N-k 轮"的缺口，却查不出是设备跳轮还是网络丢包。
+      //   只加日志，不加 JSON 字段（改接口属于要复核的决策）。
+      if ((int32_t)(millis() - g_nextPollMs) >= 0) {
+        Serial.printf("[POLL][SKIP] 落后 %ld ms，重对齐节拍（本轮之后有一轮被跳过）\n",
+                      (long)(millis() - g_nextPollMs));
+        g_nextPollMs = millis() + g_pollIntervalMs;
+      }
 #if !RS485_MODE_LOOPBACK_SELFTEST
       g_roundFailed = false;               // 本轮结果已上报，复位
       g_failSeg     = 0xFF;
