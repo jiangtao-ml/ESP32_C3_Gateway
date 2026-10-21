@@ -74,19 +74,19 @@
 //   半双工下"自己发的字节会先进 RX 缓冲"，故 ST_TX 里清 RX 必须在 write() 之前（已实现）。
 // ---------------------------------------------------------------
 #define RS485_BAUD                  9600   // 已确认为最终值（9600，8N1，无校验，设备地址 1）
-#define RS485_RX_PIN                20     // UART1 RX = GPIO20（经分压后接入）
+#define RS485_RX_PIN                20     // UART1 RX = GPIO20（3.3V 逻辑直连，不分压；实物已定稿）
                                            // ⚠️ R-13：M4 接线曾 5V 直入本脚（ESP32-C3 IO 绝对最大 3.6V），输入通路可能已受损。
                                            //    排障顺序：先用 RS485_MODE_LOOPBACK_SELFTEST=1 + 短接 GPIO21↔GPIO20 验证本脚；
                                            //    若回环异常，改用 GPIO3 / GPIO4 / GPIO5 / GPIO10 作 UART1 RX，并同步改本行与文档。
 #define RS485_TX_PIN                21     // UART1 TX = GPIO21
 #define RS485_TX_GUARD_MS           2      // 发送→接收的方向切换保护间隔（AutoDirection 换向余量）
-                                           // 说明：Serial1.flush() 在本 core（3.3.10）会一直等到 TX 完全空闲
+                                           // 说明：Serial1.flush() 在本 core（3.x；本机 3.3.10 / pio_verify 3.3.11）会一直等到 TX 完全空闲
                                            //   （HardwareSerial::flush → uartFlush → uartFlushTxOnly(uart, true) → uart_ll_is_tx_idle：
                                            //    txfifo_cnt==0 且 TX 状态机回到 IDLE），所以 2ms 不用于补 flush 的不足，
                                            //   仅为换向留防御性余量（MAX13487 手册 tDDD + tRED ≤ 2.6µs；MAX485 变体切换 DE 同理）。
-                                           // ⚠️ M4 真实总线上若稳定丢首字节，先把它调到 3~5ms 复测
+                                           // ⚠️ M4 真实总线上若稳定丢首字节，先在 config.h 把 RS485_TX_GUARD_MS 调到 3~5ms 复测（不是改 RS485_CHAR_TIMEOUT_MS）
 #define RS485_FIRST_BYTE_TIMEOUT_MS 80     // 一级：等首个字节的时限
-#define RS485_CHAR_TIMEOUT_MS       8      // M5 正式档位（4~8，取 8）。二级：字节间静默阈值（≈4 个字符时间）；
+#define RS485_CHAR_TIMEOUT_MS       8      // M5 正式档位（4~8，取 8）。二级：字节间静默阈值（≈7.7 个字符时间，8 ms @9600 8N1）；
                                            //    t3.5 框尾静默对应 9600 下约 4ms，超过即判本帧结束（半帧）。
                                            //    历史：M4 期间为「电脑端从站经 USB 转 485 批量交付」临时放大到 25；
                                            //    M5 接 QI 真机（纯硬件 UART，无 USB 批量交付抖动）起收回正式值域 4~8。
@@ -224,7 +224,7 @@
 //       168h 累计约 1.09 GB 的纯浪费，且每轮多占约 1–2 ms 主循环。
 //   ⚠️ 设为 0 后 `m4_accept.py` / `m5_parse.py` 依赖的 "[M4] 解析 OK" 与 "REG:" 锚点会消失，
 //      那些脚本只在台面用，不受影响。
-#define SERIAL_VERBOSE_ROUND         1
+#define SERIAL_VERBOSE_ROUND         0
 
 // 数据行 "seg" 取值（批次 2 起）：一帧读全 -> "1"，三段读取 -> "3"（指令 3.1 的 "<0|1|3>"）
 // ---------------------------------------------------------------
@@ -255,9 +255,9 @@
 #define POLL_PERIOD_MAX_S            5
 
 // 配置页缓冲：模板 3359 字符 + 变量展开最坏约 962 字符 => 约 4.3 KB（8192 留 ~2 倍余量）
-//   snprintf 溢出会显式告警并截断（绝不静默），见 web_config.h 的 webSendPage()。
+//   snprintf 溢出会显式告警并回 500（不发截断页），见 web_config.h 的 webSendPage()。
 #define QI_WEB_PAGE_MAX              8192
-// /status JSON 缓冲：老师 22 项 + 我方 3 项；最坏约 745 字节（超长 SSID 32B、chrony 47B、5 个计数各 10 位）。
+// /status JSON 缓冲：老师 22 项 + 我方 3 项；最坏约 761 字节（超长 SSID 32B、NTP 主机名 63B、5 个计数各 10 位）。
 //   768 仅余 ~23 B 偏紧，取 1024 留余量（snprintf 溢出会显式告警并回 500，绝不静默截断）。
 #define QI_STATUS_JSON_MAX           1024
 

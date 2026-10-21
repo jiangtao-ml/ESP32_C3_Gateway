@@ -29,9 +29,9 @@
  *     / WebServer / Preferences）；配置页手写 HTML 存 PROGMEM，JSON 手写 snprintf 组装
  *   - ⚠️ USB CDC On Boot 必须 = Enabled：否则 Serial 会落到 UART0（GPIO20/21），
  *     与 UART1 争用同一对引脚
- *   - ⚠️ 485 模块的 RXO 为 5V 时必须先 1kΩ/2kΩ 分压再进 GPIO20
+ *   - ✅ 实物已定稿：MAX13487 的 RXO 为 3.3V 逻辑，直连 GPIO20，不分压
  *   - ⚠️ EN 接法随实物主芯片型号而定（接线前先读 8 脚芯片丝印）：
- *     MAX13487 / MAX13488（5V 双向，芯片无 DE 脚）-> EN 接固定高电平（模块 VCC/5V），
+ *     MAX13487 / MAX13488（5V 双向，芯片无 DE 脚）-> EN 接固定高电平（实物定稿为 3.3V，不是 5V），
  *       不得悬空 / 接 GND / 动态切换（悬空若对应 SHDN# 会关断器件，症状即 RX=0）；
  *     MAX485 / MAX3485（单向，EN 即方向控制脚）-> EN 必须接 GPIO 由固件切换，严禁固定接高。
  *       固件已内建方向控制：把 config.h 的 RS485_DE_PIN 设为实际 GPIO 号即启用（默认 -1 = 不启用）。
@@ -214,7 +214,7 @@ static char     g_wifiPass[65]    = WIFI_PASSWORD;    // NVS wifi_pass；无值�
 static bool     g_wifiOpen        = false;            // NVS wifi_open：开放网络（无密码）
 static char     g_udpTargetIp[16] = UDP_TARGET_IP;    // NVS udp_ip；无值回落 config.h
 static uint16_t g_udpTargetPort   = UDP_TARGET_PORT;  // NVS udp_port；无值回落 config.h
-static char     g_ntpPrimary[48]  = NTP_SERVER_1;     // NVS ntp1（NTP 主源）；备源 NTP_SERVER_2/3 不变
+static char     g_ntpPrimary[64]  = NTP_SERVER_1;     // NVS ntp1（NTP 主源，isPlausibleHost 上限 63 字符 + NUL）；备源 NTP_SERVER_2/3 不变
 static uint32_t g_pollIntervalMs  = POLL_INTERVAL_MS; // NVS poll_s（1~5s）；无值回落 POLL_INTERVAL_MS
 static char     g_adminUser[33]   = "admin";          // NVS admin_user（Web 写操作 Basic Auth 账号）
 static char     g_adminPass[65]   = { 0 };            // NVS admin_pass；无值 = 与 AP 口令同源的 MAC 派生算法
@@ -404,7 +404,7 @@ static void wifiTick() {
 //   现改为：三个 slot 全量打印解析后地址 + RFC5905 reachability 移位寄存器，
 //   无论时序如何，都能一眼看出「哪个源回了包、哪个没回」。
 //
-// 所用 API（已在本 core arduino-esp32 3.3.10 中核实存在，非凭记忆）：
+// 所用 API（已在本机 core 3.3.10 与 pio_verify core 3.3.11 中核实存在，非凭记忆）：
 //   - sntp_getserver(idx) / sntp_getreachability(idx) 声明于
 //     .../esp32c3-libs/3.3.10-cn/include/lwip/lwip/src/include/lwip/apps/sntp.h，
 //     符号在 liblwip.a 中有定义；sdkconfig：CONFIG_LWIP_SNTP_MAX_SERVERS=3、
@@ -779,20 +779,22 @@ static bool buildErrJson(const char *ts, bool tsOk) {
 }
 #endif
 
-// 把 g_payload 中已组装好的一行发出去；成功（beginPacket / write / endPacket 全部正确）则累加 udp_tx
+// 把 g_payload 中已组装好的一行发出去；beginPacket / endPacket 均成功则累加 udp_tx
 static bool udpSendLine() {
   const size_t want = strlen(g_payload);
   bool ok = (g_udp.beginPacket(g_udpTargetIp, g_udpTargetPort) == 1);   // 不判返回值会让日志说谎：发失败仍打印"已发"
   if (ok) {
-    // 【2026-10-21 加固】必须核对 write() 的返回值。短写时 endPacket() 仍可能返回 1，
-    //   那样 g_udpTx 会记成"已发"而实际只发出一行的一部分 —— 接收端只会看到
-    //   bad_json，对账时却被算进"网络丢失"，把排查方向整条带偏。
+    // 【2026-10-21 Codex 复核修正】NetworkUDP::write() 的返回值是"已写入本地 tx_buffer
+    //   的字节数"，不是空口送达；Arduino-ESP32 3.x（本机 3.3.10 / pio_verify 3.3.11，
+    //   两版实现相同）的 write(buf,size) 逐字节调用且忽略单字节
+    //   返回值，最后 `return i`（= 传入 size），因此 wrote == want 恒成立，不能作为成功判据。
+    //   成功判据只保留 endPacket()==1（= sendto() 已被协议栈受理，仍不代表空口送达）。
+    //   write() 与 endPacket() 必须无条件调用，否则 pbuf 不释放。
     //   ⚠️ 这里**绝不重传**：重传会产生重复 seq，直接污染重包率(M8)。
-    //   endPacket() 必须无条件调用（`&&` 左操作数先求值），否则 pbuf 泄漏。
     const size_t wrote = g_udp.write((const uint8_t *)g_payload, want);
-    ok = (g_udp.endPacket() == 1) && (wrote == want);
-    if (ok == false && wrote != want) {
-      Serial.printf("[UDP][ERR] 短写：want=%u wrote=%u（本行未计入 udp_tx）\n",
+    ok = (g_udp.endPacket() == 1);
+    if (wrote != want) {
+      Serial.printf("[UDP][WARN] 本地缓冲短写：want=%u wrote=%u（仅诊断，不代表空口送达）\n",
                     (unsigned)want, (unsigned)wrote);
     }
   }
@@ -834,9 +836,12 @@ static void sendUdpPayload() {
     bool synced = buildTimestamp(ts, sizeof(ts));
     int  n = snprintf(g_payload, sizeof(g_payload), "%s | %s", ts, synced ? "HEARTBEAT" : "UNSYNCED");
     if (n < 0 || (size_t)n >= sizeof(g_payload)) {
-      Serial.printf("[UDP][ERR] payload buffer too small: need %d / cap %u\n", n, (unsigned)sizeof(g_payload));
+      // 【2026-10-21 Codex】g_payload 此时是不完整前缀，不能发；按"本行不发送"处理。
+      Serial.printf("[UDP][ERR] payload buffer too small: need %d / cap %u，本行不发送\n",
+                    n, (unsigned)sizeof(g_payload));
+    } else {
+      udpSendLine();
     }
-    udpSendLine();
   }
 #else
   if (!g_devIdReady) (void)refreshDevId();    // 首次读到全 0 时在这里补算
@@ -856,30 +861,35 @@ static void sendUdpPayload() {
 
   // 1) 心跳行：每轮都发（含失败轮）
   if (!buildHeartbeatJson(ts, tsOk)) {
-    Serial.printf("[UDP][ERR] payload 缓冲不足：心跳行装不下（容量 %u），本包已截断\n",
+    // 【2026-10-21 Codex】组装失败时 g_payload 是不完整 JSON，发出去只会被接收端记 bad_json，
+    //   还会被误算成网络丢失。本行不发送（seq 已在 build 内占用、udp_tx 不增，便于对账）。
+    Serial.printf("[UDP][ERR] payload 缓冲不足：心跳行装不下（容量 %u），本行不发送\n",
                   (unsigned)sizeof(g_payload));
+  } else {
+    udpSendLine();
   }
-  udpSendLine();
 
 #if !RS485_MODE_LOOPBACK_SELFTEST
 #if QI_SEND_ERR_ROW
   // 2) 失败行：失败轮在心跳行之外再发一行（§8.2 ③；拔 USB 后唯一的失败可见通道）
   if (g_roundFailed) {
     if (!buildErrJson(ts, tsOk)) {
-      Serial.printf("[UDP][ERR] payload 缓冲不足：err 行装不下（容量 %u），本包已截断\n",
+      Serial.printf("[UDP][ERR] payload 缓冲不足：err 行装不下（容量 %u），本行不发送\n",
                     (unsigned)sizeof(g_payload));
+    } else {
+      udpSendLine();
     }
-    udpSendLine();
   }
 #endif
 
   // 3) 数据行：三段全成功时再发一行（含 raw 78 字节 HEX）
   if (!g_roundFailed) {
     if (!buildDataJson(ts, tsOk)) {
-      Serial.printf("[UDP][ERR] payload 缓冲不足：数据行装不下（容量 %u），本包已截断\n",
+      Serial.printf("[UDP][ERR] payload 缓冲不足：数据行装不下（容量 %u），本行不发送\n",
                     (unsigned)sizeof(g_payload));
+    } else {
+      udpSendLine();
     }
-    udpSendLine();
   }
 #endif
 #endif
@@ -959,11 +969,12 @@ static void parseResponse() {
   }
 
   // (4) 功能码匹配（异常响应已在 (2) 提前处理，此处只判正常响应）
-  if (func != MODBUS_FUNC_READ_HOLDING && func != MODBUS_FUNC_READ_INPUT) {
+  // 【2026-10-21 Codex】正常响应必须与**本段请求**的功能码一致（全帧/3 段/回环均为 reqFunc）；
+  //   旧写法同时接受 0x03/0x04，从站若回错功能码仍会被当成功。判定顺序不变。
+  if (func != reqFunc) {
     g_statFail++; recordSegFail("FUNC");
-    Serial.printf("[M4] 功能码不匹配 期望 0x%02X/0x%02X 收到 0x%02X SEG=%s REQ=0x%02X\n",
-                  (unsigned)MODBUS_FUNC_READ_HOLDING, (unsigned)MODBUS_FUNC_READ_INPUT,
-                  (unsigned)func, tag, (unsigned)reqFunc);
+    Serial.printf("[M4] 功能码不匹配 期望 0x%02X 收到 0x%02X SEG=%s REQ=0x%02X\n",
+                  (unsigned)reqFunc, (unsigned)func, tag, (unsigned)reqFunc);
     logRxHex();
     return;
   }
@@ -1092,7 +1103,13 @@ static void stateTick() {
       // 物理回环下"发"与"收"是同时进行的，字节在 flush 返回前就已进 RX 缓冲；
       // 若照搬到 flush() 之后再清，会把刚收回来的字节一并丢掉 → 必然误报 TIMEOUT。
       // 真实总线上清的是上一周期残留（半帧 / 噪声 / 上一次的迟到响应）。
-      while (Serial1.available()) (void)Serial1.read();
+      // 【2026-10-21 Codex】有界排空：正常一帧 83 B 远小于预算；持续噪声/驱动异常时
+      //   也不会在热路径里无限读（预算 4×96+8 = 392 ≥ UART 环形缓冲 256 B + FIFO 128 B，
+      //   一次 tick 足以排空一整轮缓冲）。
+      {
+        uint16_t budget = 4U * MODBUS_RX_BUF_MAX + 8U;
+        while (budget > 0 && Serial1.available()) { (void)Serial1.read(); --budget; }
+      }
 
 #if RS485_MODE_LOOPBACK_SELFTEST
       // 回环自测：固定发 M3/M4 的 0x03 回环帧（发 8 收 8），本分支保持不动
@@ -1112,7 +1129,7 @@ static void stateTick() {
       Serial1.write(g_txFrame, g_txLen);
       Serial1.flush();                                     // 等 8 字节全部移出（9600 下约 8.3ms，有界阻塞）
 #if RS485_DE_PIN >= 0
-      // 说明：本 core（3.3.10）的 flush() = uartFlushTxOnly(uart, true)，会一直等到 TX 完全空闲
+      // 说明：本 core（3.x；本机 3.3.10 / pio_verify 3.3.11）的 flush() = uartFlushTxOnly(uart, true)，会一直等到 TX 完全空闲
       //   （txfifo_cnt==0 且 TX 状态机回到 IDLE），即移位寄存器已把最后一位送完，
       //   所以下面的等待不是为了补 flush 的不足，而是给 DE/AutoDirection 换向留防御性余量
       //   （MAX13487 手册 tDDD + tRED ≤ 2.6µs；9600 下一个字符 ≈ 1.04ms）。
@@ -1134,11 +1151,17 @@ static void stateTick() {
       uint32_t now = millis();
       if ((int32_t)(now - g_tRxStartMs) < 0) break;        // 仍在 TX_GUARD 保护间隔内
 
-      while (Serial1.available()) {                        // 收字节（read() 已设 timeout=0，不阻塞）
-        uint8_t b = (uint8_t)Serial1.read();
-        if (g_rxLen < MODBUS_RX_BUF_MAX) g_rxFrame[g_rxLen++] = b;
-        else                             g_rxOverflow = true;   // 超长帧：只标记，不再写缓冲
-        g_tRxLastByteMs = millis();
+      // 【2026-10-21 Codex】有界收字节：每次 stateTick 最多取固定预算，剩余字节留给
+      //   下一次 tick。正常 83 B 帧一次取完；持续噪声时不会长时间占住主循环。
+      {
+        uint16_t budget = 4U * MODBUS_RX_BUF_MAX + 8U;
+        while (budget > 0 && Serial1.available()) {          // read() 已设 timeout=0，不阻塞
+          uint8_t b = (uint8_t)Serial1.read();
+          if (g_rxLen < MODBUS_RX_BUF_MAX) g_rxFrame[g_rxLen++] = b;
+          else                             g_rxOverflow = true;   // 超长帧：只标记，不再写缓冲
+          g_tRxLastByteMs = millis();
+          --budget;
+        }
       }
 
       // 帧长驱动：按已收到的帧头动态推算本帧应到长度，收满即止
@@ -1270,10 +1293,11 @@ static void stateTick() {
 // ---------------------------------------------------------------
 void setup() {
   Serial.begin(115200);                    // USB CDC（Tools -> USB CDC On Boot = Enabled）
-  // 【批次1 bugfix · 2026-10-07 砚青】无主机读取（真机跑=拔 USB）时，HWCDC::write 默认
-  //   tx_timeout_ms=100ms 阻塞；每轮热路径 ~190 次 write（3 段超时/失败日志 + UDP 两行）
-  //   ⇒ 轮询被拖慢到 ~19s/轮（开串口有主机读时不阻塞，1s/轮）。设为 0 = 无主机时立即返回
-  //   （日志静默丢弃），轮询恢复 1s 节拍。⚠️ 待 Codex/用户独立复核。
+  // 【批次1 bugfix · 2026-10-07 砚青；2026-10-21 Codex 更新计数】无主机读取（真机跑=拔 USB）时，
+  //   HWCDC::write 默认 tx_timeout_ms=100ms 阻塞。热路径 write 次数随 SERIAL_VERBOSE_ROUND 变化：
+  //   =1 时约 44 次/轮（一帧读全，含 39 行 REG + UDP 回显）或约 50 次/轮（3 段）；
+  //   =0 时成功轮约 0 次（只剩失败/告警日志）。⇒ 去掉本行会拖慢到 ~19s/轮；
+  //   设为 0 = 无主机时立即返回（日志静默丢弃），轮询恢复 1s 节拍。
   Serial.setTxTimeoutMs(0);
   // USB CDC 需要主机枚举完成后才有输出；此前打的日志会丢。
   // 仅在 setup 内有界等待（最多 2s），不影响 loop() 的非阻塞约束。
@@ -1345,7 +1369,7 @@ void setup() {
   Serial.println("[485] 模式=M3 物理回环自测：请短接 GPIO21 <-> GPIO20，且不接 MAX13487");
 #else
   Serial.println("[485] 模式=真实 485 总线：ESP32(TX) -> MAX13487 -> QI 真机 STB3-125（Modbus RTU 从站地址 1）");
-  Serial.println("[485] ⚠️ RXO 先万用表实测空闲电平：5V 必须 1k/2k 分压后接 GPIO20，3.3V 则直连不分压（未实测前按 5V 处理）；MAX13487 的 EN 接固定高电平、不得动态切换；三方必须共地");
+  Serial.println("[485] ⚠️ 实物已定稿：MAX13487 RXO（3.3V 逻辑）直连 GPIO20，不分压；EN 接固定高电平、不得动态切换；三方必须共地");
   Serial.printf("[485] 方向控制：%s\n", (RS485_DE_PIN >= 0)
                 ? "EN 由 GPIO 动态切换（MAX485 / MAX3485 接法，RS485_DE_PIN 已配置）"
                 : "无（EN 固定电平，MAX13487 / MAX13488 接法；RS485_DE_PIN = -1）");

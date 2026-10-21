@@ -215,8 +215,12 @@ static void webSendPage(int code, const char *bannerText, bool isErr) {
                    g_adminUser,
                    g_apSsid, g_apPass, apIp);
   if (n < 0 || (size_t)n >= sizeof(g_webPage)) {
-    Serial.printf("[WEB][ERR] 配置页缓冲不足（需要 %d / 容量 %u），本次响应被截断\n",
+    // 【2026-10-21 Codex】缓冲区不足时 g_webPage 只是不完整的前缀，发出去会让浏览器
+    //   收到结构损坏的 HTML（缺 </html>、表单截断）。改为显式 500，不发截断内容。
+    Serial.printf("[WEB][ERR] 配置页缓冲不足（需要 %d / 容量 %u），本次返回 500，不发送截断页\n",
                   n, (unsigned)sizeof(g_webPage));
+    g_web.send(500, "text/plain; charset=utf-8", "config page too large");
+    return;
   }
   g_web.send_P(code, "text/html; charset=utf-8", g_webPage);   // send_P：不发 String 拷贝，也不触发 "String cast failed" 告警
 }
@@ -258,9 +262,16 @@ static void handleStatus() {
     g_web.send(500, "application/json; charset=utf-8", "{\"err\":\"status buffer too small\"}");
     return;
   }
-  snprintf(g_statusJson + n, sizeof(g_statusJson) - (size_t)n,
-           ",\"dev\":\"%s\",\"mode\":\"%s\",\"free_heap\":%u}",
-           g_devStr, (g_readMode == 0) ? "full" : "3seg", (unsigned)ESP.getFreeHeap());
+  // 【2026-10-21 Codex】第二次追加也要检查返回值，否则余量不足时会静默截断成非法 JSON。
+  int m = snprintf(g_statusJson + n, sizeof(g_statusJson) - (size_t)n,
+                   ",\"dev\":\"%s\",\"mode\":\"%s\",\"free_heap\":%u}",
+                   g_devStr, (g_readMode == 0) ? "full" : "3seg", (unsigned)ESP.getFreeHeap());
+  if (m < 0 || (size_t)n + (size_t)m >= sizeof(g_statusJson)) {
+    Serial.printf("[WEB][ERR] /status 二次追加缓冲不足（已有 %d + 需要 %d / 容量 %u）\n",
+                  n, m, (unsigned)sizeof(g_statusJson));
+    g_web.send(500, "application/json; charset=utf-8", "{\"err\":\"status buffer too small\"}");
+    return;
+  }
   g_web.send_P(200, "application/json; charset=utf-8", g_statusJson);
 }
 
