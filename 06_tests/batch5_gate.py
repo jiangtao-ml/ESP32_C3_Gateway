@@ -114,6 +114,7 @@ def load_rounds(conn):
         out.append({
             "epoch_id": eid, "seq": s,
             "t_hb": h["t"], "tx_hb": h["tx"],
+            "ok_hb": h["ok"], "er_hb": h["er"],
             "t_2": (n["t"] if n else None),
             "second_kind": (n["ptype"] if n else None),
             "ts2": (n["ts"] if n else None),
@@ -141,27 +142,71 @@ def g5_1(rounds, orphan=0):
     }
 
 
-def g5_2(rounds):
-    """节拍：同一 epoch 内，相邻 hb 的 udp_tx 必须恰好 +2。"""
-    bad, pairs, deltas = 0, 0, {}
+def g5_2(rounds, period_s=1.0):
+    """节拍与设备侧完整性。
+
+    🔴 2026-11-04 重写（原判据是错的，必须记住为什么）
+      原判据："相邻 hb 的 udp_tx 必须恰好 +2"，不满足即 FAIL。
+      这条**根本区分不了「设备少发」和「网络丢包」** —— 整轮两包都丢时，
+      相邻两个收到的 hb 之间 udp_tx 就是 +4，照样被判 FAIL。
+      台架首跑（3564 包）就这么误判了 23 处，实际固件毫无问题。
+
+    正确做法：用 hb 里自带的 poll 计数器当分母。
+      相邻两个**收到的** hb 之间：
+        Δtx  = 设备在这段里实际发出的包数（含我们没收到的）
+        Δrnd = Δ(ok+err) = 设备在这段里实际执行的轮数
+      固件若正常，恒有  Δtx == 2 × Δrnd。丢包不会破坏它（丢的是"收到"，不是"发出"）；
+      固件少发/半轮才会破坏它。
+
+      奇数 Δtx 才是真信号：说明某轮只发了 1 包（`!g_linkUp` 半轮，§2.3.2）。
+      本次台架 增量分布 = +2:1751 / +4:19 / +6:4，**全偶数 ⇒ 设备侧半轮 0 次**。
+
+    另配一条独立判据抓"设备跳轮"（g_nextPollMs 提前推进）：
+      执行轮数 / 墙钟秒数 必须 ≈ 1/period（00.98~1.02）。跳轮时它会掉下来，
+      而丢包不会 —— 因为丢包不影响设备自己的 poll 计数。
+    """
+    viol, odd, net_gap = 0, 0, 0
+    deltas, pairs = {}, 0
+    rounds_done, elapsed = 0, 0.0
+    worst = []
+
     for eid in sorted({r["epoch_id"] for r in rounds}):
         hbs = [r for r in rounds if r["epoch_id"] == eid and r["t_hb"] is not None
-               and r["tx_hb"] is not None]
+               and r["tx_hb"] is not None
+               and r["ok_hb"] is not None and r["er_hb"] is not None]
         hbs.sort(key=lambda r: r["t_hb"])
+        if len(hbs) < 2:
+            continue
+        rounds_done += ((hbs[-1]["ok_hb"] + hbs[-1]["er_hb"])
+                        - (hbs[0]["ok_hb"] + hbs[0]["er_hb"]))
+        elapsed += (hbs[-1]["t_hb"] - hbs[0]["t_hb"])
         for a, b in zip(hbs, hbs[1:]):
             d = b["tx_hb"] - a["tx_hb"]
+            dr = ((b["ok_hb"] + b["er_hb"]) - (a["ok_hb"] + a["er_hb"]))
             pairs += 1
             deltas[d] = deltas.get(d, 0) + 1
-            if d != 2:
-                bad += 1
-    half = sum(1 for r in rounds if r["t_hb"] is not None and r["t_2"] is None)
-    total = sum(1 for r in rounds if r["t_hb"] is not None)
-    half_ratio = (half / total) if total else None
-    ok = (pairs > 0 and bad == 0 and (half_ratio is not None and half_ratio < 0.001))
+            if d % 2 != 0:
+                odd += 1
+                if len(worst) < 5:
+                    worst.append((eid, a["seq"], b["seq"], d, dr))
+            if d != 2 * dr:
+                viol += 1
+                if len(worst) < 5:
+                    worst.append((eid, a["seq"], b["seq"], d, dr))
+            if d > 2:
+                net_gap += 1        # 这段里有整轮/多个 hb 没收到 —— 网络侧，不计 FAIL
+
+    rate = (rounds_done / elapsed) if elapsed > 0 else None
+    rate_ok = (rate is not None and
+               (1.0 / period_s) * 0.98 <= rate <= (1.0 / period_s) * 1.02)
+    ok = (pairs > 0 and viol == 0 and odd == 0 and rate_ok)
     return {
-        "ok": ok, "pairs": pairs, "bad": bad, "deltas": deltas,
-        "half": half, "half_ratio": half_ratio,
-        "note": "相邻 hb 的 udp_tx 必须 +2；半轮占比 < 0.1%",
+        "ok": ok, "pairs": pairs, "viol": viol, "odd": odd,
+        "net_gap": net_gap, "deltas": deltas,
+        "rounds": rounds_done, "elapsed": elapsed, "rate": rate,
+        "worst": worst,
+        "note": ("Δudp_tx 必须 == 2×Δ(poll_ok+poll_err)（丢包不破坏它，少发才破坏）；"
+                 "奇数 Δtx = 设备半轮；执行轮数/墙钟秒数须 ≈ 1/%.1fs" % period_s),
     }
 
 
@@ -323,17 +368,21 @@ def main(argv=None):
             print("      中位数 %s s / p99 %s s / max %s s / n=%d"
                   % (fmt(r1["med"], 4), fmt(r1["p99"], 4), fmt(r1["max"], 4), r1["n"]))
             if r1["half"] or r1["orphan"]:
-                print("      半轮 %d / 孤儿 %d" % (r1["half"], r1["orphan"]))
+                print("      第二行未到 %d / 孤儿第二行 %d（皆为网络丢失，非设备侧）"
+                      % (r1["half"], r1["orphan"]))
         print("      判据：%s" % r1["note"])
 
         print("")
-        print("G5-2 节拍与轮完整性  %s" % verdict(r2))
+        print("G5-2 节拍与设备侧完整性  %s" % verdict(r2))
         if r2["pairs"]:
-            print("      相邻 hb 数 %d，非 +2 的 %d；增量分布 %s"
-                  % (r2["pairs"], r2["bad"],
-                     ", ".join("%+d:%d" % (k, v) for k, v in sorted(r2["deltas"].items()))))
-            print("      半轮 %d（占比 %s）" % (r2["half"], fmt(
-                (r2["half_ratio"] or 0) * 100, 3) + "%"))
+            print("      相邻 hb 对 %d；Δtx≠2·Δ轮 的 %d 处；奇数 Δtx %d 处（=设备半轮）"
+                  % (r2["pairs"], r2["viol"], r2["odd"]))
+            print("      增量分布 %s（偶数>2 = 该段有整轮没收到，属网络）"
+                  % ", ".join("%+d:%d" % (k, v) for k, v in sorted(r2["deltas"].items())))
+            print("      设备执行 %d 轮 / 墙钟 %.1f s ⇒ %.4f 轮/秒"
+                  % (r2["rounds"], r2["elapsed"], r2["rate"] or 0))
+            if r2["worst"]:
+                print("      异常样本（epoch,seq_a,seq_b,Δtx,Δ轮）：%s" % (r2["worst"],))
         print("      判据：%s" % r2["note"])
 
         print("")
