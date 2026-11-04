@@ -16,6 +16,14 @@ M5 台面预演 · 电脑端 0x04 真机帧从站模拟器（手写帧组装，�
   python m5_slave_04.py COM7               # 接受任意 qty（模拟「真机接受一帧读全」）
   python m5_slave_04.py COM7 --limit16     # qty > 16 → 0x84/0x02（模拟「原文上限 16 属实」）
   python m5_slave_04.py COM7 --short N     # 每个请求最多只回 N 个寄存器（**短帧**，见下）
+  python m5_slave_04.py COM7 --reply-delay 20   # ★ 应答前等 20 ms（2026-10-26 新增，见下）
+
+--reply-delay MS（2026-10-26 新增，实测必需）：
+  主机侧 MAX13487 是 **AutoDirection**：发送结束后要过一小段时间才释放总线、重新使能接收器。
+  若从站「零延迟」立刻应答，应答会撞在主机还没释放的总线上 ⇒ 从站明明回了、主机一个字节
+  都收不到（`RX=0` / `reason:"TIMEOUT"`），**极易误判成"接收方向焊坏了"**。
+  （2026-10-26 实测：零延迟时从站日志三帧全部 TA，主机侧 RX=0；真机 STB3-125 本身有 ms 级延迟。）
+  取值：10~30 ms 一般即可；上限受主机侧「首字节 80 ms」约束，别超过 80。
 
 --short N（短响应对照从站）用于验证 P0-1「帧长必须与本段请求的寄存器数一致」：
   它回的帧**自洽**（byte count 与实收长度一致、CRC 正确、地址功能码都对），只与"请求"不符。
@@ -44,6 +52,13 @@ BAUD = 9600
 SLAVE_ID = 1
 LIMIT16 = "--limit16" in sys.argv
 SHORT = int(sys.argv[sys.argv.index("--short") + 1]) if "--short" in sys.argv else None
+# --reply-delay MS：模拟真机的应答延迟。默认 0（保持原行为）。
+#   为什么需要：主机侧 MAX13487 是 AutoDirection —— 发送结束后要过一小段时间才释放总线、
+#   重新使能接收器。若从站「零延迟」立刻应答，应答会撞在主机还没释放的总线上，
+#   结果是从站明明回了、主机却一个字节都收不到（RX=0），极易误判成"接收焊坏了"。
+#   真机（STB3-125）本身有 ms 级应答延迟，所以台面预演必须能模拟它。
+REPLY_DELAY = (int(sys.argv[sys.argv.index("--reply-delay") + 1]) / 1000.0
+               if "--reply-delay" in sys.argv else 0.0)
 
 REQ_LEN = 8          # 0x04 请求固定 8 字节：addr func startH startL qtyH qtyL crcL crcH
 MAX_QTY = 39         # 30001~30039
@@ -112,6 +127,10 @@ def handle(ser: serial.Serial, frame: bytes) -> None:
     if addr != SLAVE_ID:
         print("[{}] [slave] 地址不匹配（{} != {}），不响应".format(stamp(), addr, SLAVE_ID), flush=True)
         return
+
+    # 模拟真机应答延迟：给主机侧 AutoDirection 留出「释放总线 + 重新使能接收器」的时间
+    if REPLY_DELAY > 0:
+        time.sleep(REPLY_DELAY)
 
     if func != 0x04:
         resp = exc_resp(addr, func, 0x01)

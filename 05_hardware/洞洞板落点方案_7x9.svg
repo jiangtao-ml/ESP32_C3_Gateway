@@ -1,0 +1,283 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1210" viewBox="0 0 1440 1210" font-family="'Microsoft YaHei','PingFang SC','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <pattern id="grid" width="22" height="22" patternUnits="userSpaceOnUse" patternTransform="translate(130 130)">
+      <circle cx="11" cy="11" r="2.6" fill="#bccbb0"/>
+    </pattern>
+    <linearGradient id="modG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a55a6"/><stop offset="1" stop-color="#17356e"/>
+    </linearGradient>
+    <linearGradient id="espG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34383f"/><stop offset="1" stop-color="#1b1e23"/>
+    </linearGradient>
+    <filter id="sh" x="-15%" y="-15%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0b1a2b" flood-opacity="0.12"/>
+    </filter>
+    <style>.lbl{stroke:#eef6e8;stroke-width:3.5;paint-order:stroke;stroke-linejoin:round}</style>
+  </defs>
+
+  <rect width="1440" height="1210" fill="#f4f6f9"/>
+
+  <text x="60" y="52" font-size="28" font-weight="700" fill="#111827">洞洞板落点方案 v3 · 交叉全部消解版</text>
+  <text x="60" y="80" font-size="14" fill="#4b5563">锡条（裸铜）只走 5 根不交叉的线：W1 / W2 / W6 / W7 / W8　｜　TXD、RXD、GND 三根改<tspan font-weight="700" fill="#7c3aed">绝缘飞线</tspan>架空跨过　⇒　<tspan font-weight="700" fill="#b32020">0 过孔、锡条上零交叉</tspan></text>
+  <line x1="60" y1="98" x2="1380" y2="98" stroke="#d6dde8" stroke-width="1.5"/>
+
+  <rect x="130" y="130" width="528" height="660" fill="#eaf2e2" stroke="#a0b794" stroke-width="2"/>
+  <rect x="130" y="130" width="528" height="660" fill="url(#grid)"/>
+
+  <g>
+    <circle cx="112" cy="112" r="7" fill="#fff" stroke="#8a9aa8" stroke-width="1.6"/>
+    <circle cx="676" cy="112" r="7" fill="#fff" stroke="#8a9aa8" stroke-width="1.6"/>
+    <circle cx="112" cy="808" r="7" fill="#fff" stroke="#8a9aa8" stroke-width="1.6"/>
+    <circle cx="676" cy="808" r="7" fill="#fff" stroke="#8a9aa8" stroke-width="1.6"/>
+  </g>
+
+  <g font-size="9.5" fill="#5d6b5a" text-anchor="middle">
+    <text x="141" y="122">A</text><text x="163" y="122">B</text><text x="185" y="122">C</text><text x="207" y="122">D</text>
+    <text x="229" y="122">E</text><text x="251" y="122">F</text><text x="273" y="122">G</text><text x="295" y="122">H</text>
+    <text x="317" y="122">I</text><text x="339" y="122">J</text><text x="361" y="122">K</text><text x="383" y="122">L</text>
+    <text x="405" y="122">M</text><text x="427" y="122">N</text><text x="449" y="122">O</text><text x="471" y="122">P</text>
+    <text x="493" y="122">Q</text><text x="515" y="122">R</text><text x="537" y="122">S</text><text x="559" y="122">T</text>
+    <text x="581" y="122">U</text><text x="603" y="122">V</text><text x="625" y="122">W</text><text x="647" y="122">X</text>
+  </g>
+  <g font-size="9.5" fill="#5d6b5a" text-anchor="middle">
+    <text x="141" y="800">A</text><text x="163" y="800">B</text><text x="185" y="800">C</text><text x="207" y="800">D</text>
+    <text x="229" y="800">E</text><text x="251" y="800">F</text><text x="273" y="800">G</text><text x="295" y="800">H</text>
+    <text x="317" y="800">I</text><text x="339" y="800">J</text><text x="361" y="800">K</text><text x="383" y="800">L</text>
+    <text x="405" y="800">M</text><text x="427" y="800">N</text><text x="449" y="800">O</text><text x="471" y="800">P</text>
+    <text x="493" y="800">Q</text><text x="515" y="800">R</text><text x="537" y="800">S</text><text x="559" y="800">T</text>
+    <text x="581" y="800">U</text><text x="603" y="800">V</text><text x="625" y="800">W</text><text x="647" y="800">X</text>
+  </g>
+  <g font-size="9" fill="#5d6b5a" text-anchor="end">
+    <text x="123" y="144">030</text><text x="123" y="166">029</text><text x="123" y="188">028</text><text x="123" y="210">027</text>
+    <text x="123" y="232">026</text><text x="123" y="254">025</text><text x="123" y="276">024</text><text x="123" y="298">023</text>
+    <text x="123" y="320">022</text><text x="123" y="342">021</text><text x="123" y="364">020</text><text x="123" y="386">019</text>
+    <text x="123" y="408">018</text><text x="123" y="430">017</text><text x="123" y="452">016</text><text x="123" y="474">015</text>
+    <text x="123" y="496">014</text><text x="123" y="518">013</text><text x="123" y="540">012</text><text x="123" y="562">011</text>
+    <text x="123" y="584">010</text><text x="123" y="606">009</text><text x="123" y="628">008</text><text x="123" y="650">007</text>
+    <text x="123" y="672">006</text><text x="123" y="694">005</text><text x="123" y="716">004</text><text x="123" y="738">003</text>
+    <text x="123" y="760">002</text><text x="123" y="782">001</text>
+  </g>
+
+  <!-- 杜邦线焊盘 P1~P3 -->
+  <g>
+    <circle cx="185" cy="207" r="9" fill="#e0a33a" stroke="#8a5c0d" stroke-width="2"/>
+    <circle cx="207" cy="207" r="9" fill="#e0a33a" stroke="#8a5c0d" stroke-width="2"/>
+    <circle cx="229" cy="207" r="9" fill="#e0a33a" stroke="#8a5c0d" stroke-width="2"/>
+    <line x1="185" y1="198" x2="141" y2="148" stroke="#b07a1a" stroke-width="2.6" stroke-dasharray="6 4"/>
+    <line x1="207" y1="198" x2="163" y2="148" stroke="#b07a1a" stroke-width="2.6" stroke-dasharray="6 4"/>
+    <line x1="229" y1="198" x2="185" y2="148" stroke="#b07a1a" stroke-width="2.6" stroke-dasharray="6 4"/>
+    <text class="lbl" x="196" y="188" font-size="9" font-weight="700" fill="#7a4f0a" text-anchor="middle">A B GND</text>
+  </g>
+  <text class="lbl" x="252" y="204" font-size="10.5" font-weight="700" fill="#7a4f0a">焊盘 P1·P2·P3</text>
+  <text class="lbl" x="252" y="219" font-size="9.5" fill="#8a6519">各引 1 根杜邦线</text>
+
+  <!-- MAX13487 -->
+  <rect x="172" y="273" width="116" height="176" rx="3" fill="url(#modG)" stroke="#0f1f45" stroke-width="2" filter="url(#sh)"/>
+  <text x="230" y="350" font-size="10.5" font-weight="700" fill="#9dc0f5" text-anchor="middle">M1</text>
+  <text x="230" y="368" font-size="9.5" fill="#9dc0f5" text-anchor="middle">MAX13487</text>
+  <text x="230" y="384" font-size="8.5" fill="#7ba4de" text-anchor="middle">RS485 V2.05</text>
+
+  <!-- ESP32（USB 朝南） -->
+  <rect x="284" y="570" width="154" height="177" rx="3" fill="url(#espG)" stroke="#0c0e11" stroke-width="2" filter="url(#sh)"/>
+  <text x="361" y="652" font-size="11" font-weight="700" fill="#aeb6c2" text-anchor="middle">ESP32-C3</text>
+  <text x="361" y="668" font-size="9.5" fill="#8b949f" text-anchor="middle">SuperMini</text>
+  <rect x="332" y="741" width="58" height="21" rx="3" fill="#8b939d" stroke="#4a5058" stroke-width="1.4"/>
+  <polygon points="361,762 361,776 354,770" fill="#374151"/>
+  <text class="lbl" x="405" y="776" font-size="10.5" font-weight="700" fill="#b32020">USB 朝板外 ↓</text>
+  <text class="lbl" x="405" y="791" font-size="9.5" fill="#8a4a4a">板下方留 ≥15 mm 插线</text>
+
+  <!-- ESP32 未用引脚 -->
+  <g fill="#6b7280">
+    <circle cx="295" cy="647" r="3"/><circle cx="295" cy="669" r="3"/><circle cx="295" cy="691" r="3"/><circle cx="295" cy="713" r="3"/><circle cx="295" cy="735" r="3"/>
+    <circle cx="427" cy="647" r="3"/><circle cx="427" cy="669" r="3"/><circle cx="427" cy="691" r="3"/><circle cx="427" cy="713" r="3"/><circle cx="427" cy="735" r="3"/>
+  </g>
+  <!-- ESP32 用到的脚 -->
+  <g fill="#d6dde6" stroke="#7b8794" stroke-width="1.2">
+    <circle cx="295" cy="735" r="4.5"/><circle cx="295" cy="713" r="4.5"/><circle cx="295" cy="691" r="4.5"/>
+    <circle cx="427" cy="603" r="4.5"/><circle cx="427" cy="581" r="4.5"/>
+  </g>
+  <g font-size="8.5" fill="#eef2f7" font-weight="700">
+    <text x="303" y="738">5V</text>
+    <text x="303" y="716">G</text>
+    <text x="303" y="694">3.3</text>
+    <text x="419" y="606" text-anchor="end">20</text>
+    <text x="419" y="584" text-anchor="end">21</text>
+  </g>
+
+  <!-- 模块引脚 -->
+  <g fill="#d6dde6" stroke="#7b8794" stroke-width="1.2">
+    <circle cx="185" cy="295" r="4.5"/><circle cx="207" cy="295" r="4.5"/><circle cx="229" cy="295" r="4.5"/>
+    <circle cx="185" cy="427" r="4.5"/><circle cx="207" cy="427" r="4.5"/><circle cx="229" cy="427" r="4.5"/><circle cx="251" cy="427" r="4.5"/><circle cx="273" cy="427" r="4.5"/>
+  </g>
+  <g font-size="8.5" fill="#dbe7f8" font-weight="700" text-anchor="middle">
+    <text x="185" y="310">A</text><text x="207" y="310">B</text><text x="229" y="310">GND</text>
+    <text x="185" y="418">GND</text><text x="207" y="418">TXD</text><text x="229" y="418">RXD</text><text x="251" y="418">VCC</text><text x="273" y="418">EN</text>
+  </g>
+
+  <!-- ===== ① 锡条（裸铜）——先焊，粗线 ===== -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="5.4">
+    <path d="M 295 735 L 251 735 L 251 427" stroke="#d92b2b"/>
+    <path d="M 295 691 L 273 691 L 273 427" stroke="#1f6fd0"/>
+    <path d="M 185 295 L 185 207" stroke="#e8730c"/>
+    <path d="M 207 295 L 207 207" stroke="#e8730c"/>
+    <path d="M 229 295 L 229 207" stroke="#2b2f36"/>
+  </g>
+
+  <!-- ===== ② 绝缘飞线——后穿，细线 + 白色绝缘层 ===== -->
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#f4f6f9" stroke-width="7.5">
+      <path d="M 295 713 L 185 713 L 185 427"/>
+      <path d="M 427 581 L 471 581 L 471 493 L 229 493 L 229 427"/>
+      <path d="M 427 603 L 493 603 L 493 515 L 207 515 L 207 427"/>
+    </g>
+    <g stroke-width="3">
+      <path d="M 295 713 L 185 713 L 185 427" stroke="#2b2f36"/>
+      <path d="M 427 581 L 471 581 L 471 493 L 229 493 L 229 427" stroke="#1a9e4b"/>
+      <path d="M 427 603 L 493 603 L 493 515 L 207 515 L 207 427" stroke="#e0a800"/>
+    </g>
+  </g>
+
+  <!-- ===== 交叉点标记 ===== -->
+  <g font-size="8" font-weight="700" text-anchor="middle">
+    <g><circle cx="251" cy="713" r="6.4" fill="#fff" stroke="#d14343" stroke-width="1.9"/><text x="251" y="716" fill="#d14343">1</text></g>
+    <g><circle cx="251" cy="515" r="6.4" fill="#fff" stroke="#d14343" stroke-width="1.9"/><text x="251" y="518" fill="#d14343">2</text></g>
+    <g><circle cx="273" cy="515" r="6.4" fill="#fff" stroke="#d14343" stroke-width="1.9"/><text x="273" y="518" fill="#d14343">3</text></g>
+    <g><circle cx="251" cy="493" r="6.4" fill="#fff" stroke="#d14343" stroke-width="1.9"/><text x="251" y="496" fill="#d14343">4</text></g>
+    <g><circle cx="273" cy="493" r="6.4" fill="#fff" stroke="#d14343" stroke-width="1.9"/><text x="273" y="496" fill="#d14343">5</text></g>
+    <g><circle cx="471" cy="515" r="6.4" fill="#fff" stroke="#d14343" stroke-width="1.9"/><text x="471" y="518" fill="#d14343">6</text></g>
+  </g>
+
+  <!-- W 编号 -->
+  <g font-size="9" font-weight="700">
+    <g><rect x="256" y="596" width="20" height="15" rx="3" fill="#d92b2b"/><text x="266" y="607" fill="#fff" text-anchor="middle">W1</text></g>
+    <g><rect x="278" y="648" width="20" height="15" rx="3" fill="#1f6fd0"/><text x="288" y="659" fill="#fff" text-anchor="middle">W2</text></g>
+    <g><rect x="196" y="722" width="20" height="15" rx="3" fill="#2b2f36"/><text x="206" y="733" fill="#fff" text-anchor="middle">W3</text></g>
+    <g><rect x="498" y="502" width="20" height="15" rx="3" fill="#1a9e4b"/><text x="508" y="513" fill="#fff" text-anchor="middle">W4</text></g>
+    <g><rect x="500" y="562" width="20" height="15" rx="3" fill="#e0a800"/><text x="510" y="573" fill="#3a2c00" text-anchor="middle">W5</text></g>
+    <g><rect x="166" y="240" width="20" height="15" rx="3" fill="#e8730c"/><text x="176" y="251" fill="#fff" text-anchor="middle">W6</text></g>
+    <g><rect x="212" y="244" width="20" height="15" rx="3" fill="#e8730c"/><text x="222" y="255" fill="#fff" text-anchor="middle">W7</text></g>
+    <g><rect x="234" y="240" width="20" height="15" rx="3" fill="#2b2f36"/><text x="244" y="251" fill="#fff" text-anchor="middle">W8</text></g>
+  </g>
+
+  <text x="130" y="826" font-size="11" fill="#6b7280">板 7×9 cm ｜ 24 列 A–X ｜ 30 行 001–030 ｜ 孔距 2.54 mm ｜ 四角安装孔在孔阵外，必须在焊之前钻</text>
+
+  <!-- ============ 右侧：落点表 ============ -->
+  <rect x="700" y="130" width="670" height="300" rx="8" fill="#fff" stroke="#dde3ec" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="724" y="162" font-size="15.5" font-weight="700" fill="#111827">① 落点表（器件插哪几个孔）</text>
+  <g font-size="12">
+    <text x="724" y="192" font-size="10.5" fill="#8a94a3">器件</text>
+    <text x="880" y="192" font-size="10.5" fill="#8a94a3">行</text>
+    <text x="952" y="192" font-size="10.5" fill="#8a94a3">列</text>
+    <text x="1070" y="192" font-size="10.5" fill="#8a94a3">说明</text>
+
+    <text x="724" y="222" font-weight="700" fill="#111827">杜邦焊盘 P1~P3</text>
+    <text x="880" y="222" fill="#1d4ed8" font-weight="700">27</text>
+    <text x="952" y="222" fill="#111827" font-weight="700">C / D / E</text>
+    <text x="1070" y="222" fill="#6b7280" font-size="11">P1=A、P2=B、P3=GND，间距 1 格</text>
+
+    <text x="724" y="252" font-weight="700" fill="#111827">模块 3 脚排</text>
+    <text x="880" y="252" fill="#1d4ed8" font-weight="700">23</text>
+    <text x="952" y="252" fill="#111827" font-weight="700">C / D / E</text>
+    <text x="1070" y="252" fill="#6b7280" font-size="11">A、B、GND（与焊盘同列，直连）</text>
+
+    <text x="724" y="282" font-weight="700" fill="#111827">模块 5 脚排</text>
+    <text x="880" y="282" fill="#1d4ed8" font-weight="700">17</text>
+    <text x="952" y="282" fill="#111827" font-weight="700">C ~ G</text>
+    <text x="1070" y="282" fill="#6b7280" font-size="11">5 个连续孔，脚距 1 格</text>
+
+    <text x="724" y="312" font-weight="700" fill="#111827">ESP32 西列</text>
+    <text x="880" y="312" fill="#1d4ed8" font-weight="700">3 ~ 10</text>
+    <text x="952" y="312" fill="#111827" font-weight="700">H</text>
+    <text x="1070" y="312" fill="#6b7280" font-size="11">5V G 3.3 4 3 2 1 0（自南向北）</text>
+
+    <text x="724" y="342" font-weight="700" fill="#111827">ESP32 东列</text>
+    <text x="880" y="342" fill="#1d4ed8" font-weight="700">3 ~ 10</text>
+    <text x="952" y="342" fill="#111827" font-weight="700">N</text>
+    <text x="1070" y="342" fill="#6b7280" font-size="11">5 6 7 8 9 10 20 21（自南向北）</text>
+
+    <line x1="724" y1="358" x2="1346" y2="358" stroke="#e6ebf2" stroke-width="1.5"/>
+    <text x="724" y="382" font-size="11.5" fill="#6b7280">两列相距 6 格（15.24 mm）；模块两排针相距 <tspan fill="#6d28d9" font-weight="700">必须先量</tspan>，量出几格就把行 23 与 17 的差改成那个数。</text>
+    <text x="724" y="402" font-size="11.5" fill="#6b7280">这 5 个器件的行/列是<b>相对关系</b>，不是死坐标——整体平移不影响接线；干插对不上就一起挪。</text>
+  </g>
+
+  <!-- ============ 右侧：接线表 ============ -->
+  <rect x="700" y="450" width="670" height="322" rx="8" fill="#fff" stroke="#dde3ec" stroke-width="1.5"/>
+  <text x="724" y="482" font-size="15.5" font-weight="700" fill="#111827">② 8 根线（按字母接，不按位置）</text>
+  <g font-size="11.5">
+    <text x="724" y="508" font-size="10.5" fill="#8a94a3">#</text>
+    <text x="752" y="508" font-size="10.5" fill="#8a94a3">起点（列-行）</text>
+    <text x="916" y="508" font-size="10.5" fill="#8a94a3">终点（列-行）</text>
+    <text x="1060" y="508" font-size="10.5" fill="#8a94a3">线材 / 要点</text>
+
+    <g fill="#111827">
+      <rect x="722" y="518" width="14" height="14" rx="3" fill="#d92b2b"/><text x="752" y="530">H-3 · 5V</text><text x="886" y="530" fill="#9aa3b0">→</text><text x="910" y="530" font-weight="700">F-17 · VCC</text><text x="1060" y="530" font-size="11" fill="#6b7280">锡条；从西侧绕过本体</text>
+
+      <rect x="722" y="548" width="14" height="14" rx="3" fill="#1f6fd0"/><text x="752" y="560">H-5 · 3.3</text><text x="886" y="560" fill="#9aa3b0">→</text><text x="910" y="560" font-weight="700">G-17 · EN</text><text x="1060" y="560" font-size="11" fill="#c62828">锡条；固定高电平，不是 5V</text>
+
+      <rect x="722" y="578" width="14" height="14" rx="3" fill="#2b2f36"/><text x="752" y="590">H-4 · G</text><text x="886" y="590" fill="#9aa3b0">→</text><text x="910" y="590" font-weight="700">C-17 · GND</text><text x="1060" y="590" font-size="11" fill="#7c3aed">绝缘线；只交叉 1 处（X1）</text>
+
+      <rect x="722" y="608" width="14" height="14" rx="3" fill="#1a9e4b"/><text x="752" y="620">N-10 · 21</text><text x="886" y="620" fill="#9aa3b0">→</text><text x="910" y="620" font-weight="700">E-17 · RXD</text><text x="1060" y="620" font-size="11" fill="#7c3aed">绝缘线；交叉 3 处（X4 X5 X6）</text>
+
+      <rect x="722" y="638" width="14" height="14" rx="3" fill="#e0a800"/><text x="752" y="650">N-9 · 20</text><text x="886" y="650" fill="#9aa3b0">→</text><text x="910" y="650" font-weight="700">D-17 · TXD</text><text x="1060" y="650" font-size="11" fill="#7c3aed">绝缘线；交叉 3 处（X2 X3 X6）</text>
+
+      <rect x="722" y="668" width="14" height="14" rx="3" fill="#e8730c"/><text x="752" y="680">C-23 · A</text><text x="886" y="680" fill="#9aa3b0">→</text><text x="910" y="680" font-weight="700">P1 · C-27</text><text x="1060" y="680" font-size="11" fill="#6b7280">锡条；直上 4 格</text>
+
+      <rect x="722" y="698" width="14" height="14" rx="3" fill="#e8730c"/><text x="752" y="710">D-23 · B</text><text x="886" y="710" fill="#9aa3b0">→</text><text x="910" y="710" font-weight="700">P2 · D-27</text><text x="1060" y="710" font-size="11" fill="#6b7280">锡条；直上 4 格</text>
+
+      <rect x="722" y="728" width="14" height="14" rx="3" fill="#2b2f36"/><text x="752" y="740">E-23 · GND</text><text x="886" y="740" fill="#9aa3b0">→</text><text x="910" y="740" font-weight="700">P3 · E-27</text><text x="1060" y="740" font-size="11" fill="#6b7280">锡条；直上 4 格，与真机共地</text>
+    </g>
+    <text x="724" y="762" font-size="11" fill="#6b7280"><tspan font-weight="700">粗线 = 锡条（裸铜）</tspan>，<tspan font-weight="700">细线 + 白边 = 绝缘飞线</tspan>。W4 绕到 row 014（不是 012），W5 走 row 013。</text>
+  </g>
+
+  <!-- ============ 底部三卡 ============ -->
+  <rect x="60" y="852" width="440" height="176" rx="8" fill="#fff8f0" stroke="#f0c48a" stroke-width="1.5"/>
+  <text x="84" y="882" font-size="15" font-weight="700" fill="#9a5b00">③ 焊前必须先做的 4 件事</text>
+  <g font-size="12" fill="#6b4a12">
+    <text x="84" y="910">1. 量模块两排针间距（几格）——决定行 23 与 17</text>
+    <text x="84" y="934">2. 干插两模块，读实际占用的列/行，填表</text>
+    <text x="84" y="958">3. 逐脚核对丝印（照片里模块是倒的，别照抄）</text>
+    <text x="84" y="982">4. 四角钻 ⌀3.2 安装孔（焊之前钻）</text>
+    <text x="84" y="1008" font-size="11.5" fill="#b32020">顺序不能换：钻孔 → 干插定位 → 才动烙铁</text>
+  </g>
+
+  <rect x="520" y="852" width="400" height="176" rx="8" fill="#fff5f5" stroke="#e8b4b4" stroke-width="1.5"/>
+  <text x="544" y="882" font-size="15" font-weight="700" fill="#b32020">四条不能碰的线</text>
+  <g font-size="12" fill="#5c2b2b">
+    <text x="544" y="910">✕ <tspan font-weight="700">TXD 接 TXD / RXD 接 RXD</tspan></text>
+    <text x="560" y="930" font-size="11.5">同名字接 ⇒ 双向全断，电源灯还亮</text>
+    <text x="544" y="956">✕ EN 接 5V、VCC 接 3.3V</text>
+    <text x="544" y="982">✕ 外加 120 Ω / 4.7 kΩ（板载已有 472/121/472）</text>
+    <text x="544" y="1008">✕ 没电检（M1–M17）就上电</text>
+  </g>
+
+  <rect x="940" y="852" width="440" height="176" rx="8" fill="#fff" stroke="#dde3ec" stroke-width="1.5"/>
+  <text x="964" y="882" font-size="15" font-weight="700" fill="#111827">④ 焊接顺序（顺序反了就得拆）</text>
+  <g font-size="12" fill="#4b5563">
+    <text x="964" y="908">1. 钻安装孔 + 干插定位（不焊）</text>
+    <text x="964" y="930">2. 三个焊盘 P1~P3</text>
+    <text x="964" y="952">3. 模块：先对角 2 脚，复查再补全 5+3</text>
+    <text x="964" y="974">4. ESP32：先对角 2 脚，插 USB 复查再补全</text>
+    <text x="964" y="996" font-weight="700" fill="#9a5b00">5. 先焊锡条（粗）：W1 → W2 → W6/7/8</text>
+    <text x="964" y="1018" font-weight="700" fill="#7c3aed">6. 最后穿绝缘线：W3 → W4 → W5（架在锡条上）</text>
+  </g>
+
+  <!-- ============ 交叉处理表 ============ -->
+  <rect x="60" y="1046" width="1320" height="148" rx="8" fill="#fff" stroke="#e8b4b4" stroke-width="1.5"/>
+  <text x="84" y="1076" font-size="15" font-weight="700" fill="#b32020">⑤ 6 处交叉的处理：全部由绝缘线架空跨过，锡条上不出现交叉，也不需要过孔</text>
+  <text x="900" y="1076" font-size="11" fill="#8a94a3">粗线 = 锡条裸铜　｜　细线 + 白边 = 绝缘飞线</text>
+
+  <g font-size="10.5" fill="#8a94a3">
+    <text x="88" y="1100">编号</text><text x="132" y="1100">孔位</text><text x="196" y="1100">交叉的两根线</text><text x="420" y="1100">谁架空</text>
+    <text x="748" y="1100">编号</text><text x="792" y="1100">孔位</text><text x="856" y="1100">交叉的两根线</text><text x="1080" y="1100">谁架空</text>
+  </g>
+  <g font-size="11.5" fill="#111827">
+    <text x="88" y="1124" font-weight="700" fill="#d14343">X1</text><text x="132" y="1124">F-004</text><text x="196" y="1124">W3 GND × W1 5V</text><text x="420" y="1124" fill="#2b2f36">W3（绝缘线）</text>
+    <text x="88" y="1146" font-weight="700" fill="#d14343">X2</text><text x="132" y="1146">F-013</text><text x="196" y="1146">W5 TXD × W1 5V</text><text x="420" y="1146" fill="#c49000">W5（绝缘线）</text>
+    <text x="88" y="1168" font-weight="700" fill="#d14343">X3</text><text x="132" y="1168">G-013</text><text x="196" y="1168">W5 TXD × W2 3.3V</text><text x="420" y="1168" fill="#c49000">W5（绝缘线）</text>
+
+    <text x="748" y="1124" font-weight="700" fill="#d14343">X4</text><text x="792" y="1124">F-014</text><text x="856" y="1124">W4 RXD × W1 5V</text><text x="1080" y="1124" fill="#1a9e4b">W4（绝缘线）</text>
+    <text x="748" y="1146" font-weight="700" fill="#d14343">X5</text><text x="792" y="1146">G-014</text><text x="856" y="1146">W4 RXD × W2 3.3V</text><text x="1080" y="1146" fill="#1a9e4b">W4（绝缘线）</text>
+    <text x="748" y="1168" font-weight="700" fill="#d14343">X6</text><text x="792" y="1168">P-013</text><text x="856" y="1168">W4 RXD × W5 TXD</text><text x="1080" y="1168" fill="#1a9e4b">两根都绝缘</text>
+  </g>
+  <text x="88" y="1188" font-size="11" fill="#b32020">⚠ 原方案里 W1(5V) 和 W3(GND) <tspan font-weight="700">都落在 F-004 同一个孔</tspan> —— 那不是「交叉」，是 5V 直接碰 GND。改后 F-004 孔里只焊 W1，W3 从锡条上方架空过去。</text>
+</svg>

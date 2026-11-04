@@ -105,7 +105,13 @@ static const char QI_STATUS_FMT[] =
     "{\"mac\":\"%s\",\"fw\":\"%s\",\"configured\":%s,\"wifi_ssid_cfg\":\"%s\",\"wifi_from_builtin\":%s,"
     "\"chrony\":\"%s\",\"server\":\"%s\",\"port\":%u,\"poll_period_s\":%u,\"wifi_connected\":%s,"
     "\"ssid\":\"%s\",\"ip\":\"%s\",\"rssi\":%d,\"ap\":\"%s\",\"ap_ip\":\"%s\",\"time_synced\":%s,"
-    "\"uptime_ms\":%lu,\"poll_ok\":%u,\"poll_err\":%u,\"udp_tx\":%u,\"queue\":%u,\"dropped\":%u";// ================================================================
+    "\"uptime_ms\":%lu,\"poll_ok\":%u,\"poll_err\":%u,\"udp_tx\":%u,\"queue\":null,\"dropped\":null";
+// 【2026-10-27 砚青】`queue` / `dropped` 由「恒发 0」改为 **JSON null**（B 类第 6 项，口径统一）：
+//   补传队列属 M6，本批次**根本没有这个结构** ⇒ 说实话就该是 null，不是 0。
+//   发 0 会让接收端/报表读成「队列长度为 0、从未丢包」，属**语义造假**；
+//   而心跳一直是 null（契约见 02_docs/16）⇒ 两处口径此前不一致，本次统一为 null。
+//   ⚠️ 接收端如按 int 解析这两个键会抛 TypeError，须按"可空"处理（与心跳同）。
+// ================================================================
 // 2. Web 层状态（静态分配，非阻塞）
 // ================================================================
 static WebServer   g_web(80);            // 绑所有接口：SoftAP(192.168.4.1) 与 STA 本机 IP(192.168.1.200) 均可访问
@@ -255,8 +261,8 @@ static void handleStatus() {
                    g_apSsid, apIp,
                    g_timeSynced ? "true" : "false",
                    (unsigned long)millis(),
-                   (unsigned)g_pollOk, (unsigned)g_pollErr, (unsigned)g_udpTx,
-                   (unsigned)0, (unsigned)0);          // queue / dropped：补传队列属 M6，本批次恒 0（非造假，语义=尚无队列）
+                   (unsigned)g_pollOk, (unsigned)g_pollErr, (unsigned)g_udpTx);
+                   // queue / dropped 已改为格式串里的字面 null，**不再传参**（少两个 %u 占位）
   if (n <= 0 || (size_t)n >= sizeof(g_statusJson)) {
     Serial.printf("[WEB][ERR] /status 缓冲不足（需要 %d / 容量 %u）\n", n, (unsigned)sizeof(g_statusJson));
     g_web.send(500, "application/json; charset=utf-8", "{\"err\":\"status buffer too small\"}");

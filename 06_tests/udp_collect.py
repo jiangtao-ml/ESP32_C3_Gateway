@@ -106,6 +106,12 @@ BACKUP_INTERVAL_S = 24 * 3600  # 每天一份在线备份（VACUUM INTO 的等�
 BACKUP_KEEP = 3
 DISK_LOW_GB = 10.0
 
+# 本机时钟与固件 NTP 时间允许的最大偏差（秒）。超过即记 HOST_CLK_SKEW（10 min 节流）。
+# 为什么要查：`ts_ok=false` 的行（固件未对时）靠 BootAnchor 用「首包到达墙钟 − BOOT 秒数」
+# 反推开机时刻 —— 本机时钟一旦偏了，整个世代的 collect_time 会整体平移，
+# 而报告里看不出任何异常（因为每行都自洽）。这是"数据一致性"的隐形杀手。
+HOST_SKEW_WARN_S = 5.0
+
 # 该型号恒不上报的字段（raw 恒 0 ⇒ 恰为量程下限 -40 ℃ 的"无数据"伪装）
 # 与固件 QI_PHASE_TEMP_ABSENT=1 口径一致；不列入则每一行都会被降级成 PARTIAL。
 KNOWN_MISSING = {"A_temp", "B_temp", "C_temp"}
@@ -524,7 +530,7 @@ class BootAnchor:
         """→ (collect_time 'YYYY-mm-dd HH:MM:SS', src_tag, ok)"""
         if not isinstance(ts_raw, str):
             return None, "udp_bad", False
-        s = ts_raw.strip().replace("T", " ")
+        s = ts_raw.strip()
         if s.startswith("BOOT+"):
             try:
                 secs = float(s[5:])
@@ -535,9 +541,40 @@ class BootAnchor:
                 a = recv_wall - timedelta(seconds=secs)
                 self.anchor[epoch_id] = a
             return (a + timedelta(seconds=secs)).strftime("%Y-%m-%d %H:%M:%S"), "udp_boot", False
+        s = s.replace("T", " ")
         if len(s) >= 19 and s[4] == "-" and s[7] == "-" and s[13] == ":":
             return s[:19], "udp", True
         return None, "udp_bad", False
+
+
+def seed_boot_anchors(conn: sqlite3.Connection, anchors: BootAnchor, lg=None) -> int:
+    """从原始包恢复每世代首个 BOOT+ 包的锚点（接收端重启后不能重新锚定）。
+
+    锚点必须来自**当时**的 recv_time，而不是当前墙钟：接收端重启后收到的
+    BOOT+ 秒数仍是开机以来的累计值，用重启时刻重算会把整个世代整体平移。
+    """
+    n = 0
+    for r in conn.execute(
+            "SELECT epoch_id,payload,recv_time FROM udp_packet "
+            "WHERE ptype='data' AND parse_status='ok' AND epoch_id IS NOT NULL "
+            "AND payload IS NOT NULL ORDER BY id"):
+        eid = r["epoch_id"]
+        if eid in anchors.anchor:
+            continue
+        try:
+            obj = json.loads(bytes(r["payload"]).decode("utf-8", "replace"))
+            ts = obj.get("ts")
+            if not isinstance(ts, str) or not ts.strip().startswith("BOOT+"):
+                continue
+            secs = float(ts.strip()[5:])
+            recv = datetime.strptime(r["recv_time"], "%Y-%m-%d %H:%M:%S.%f")
+        except (ValueError, TypeError, KeyError):
+            continue
+        anchors.anchor[eid] = recv.replace(tzinfo=CST) - timedelta(seconds=secs)
+        n += 1
+    if lg is not None and n:
+        lg.info("[T2] 从库中恢复 %d 个世代 BootAnchor（BOOT+ 跨重启对齐）", n)
+    return n
 
 
 # ---------------------------------------------------------------- JSON → store
@@ -685,6 +722,20 @@ class Receiver(threading.Thread):
             return
 
         sock_err = 0
+        # 防御性自检：回调必须真的可调用。Python 3.13 的 threading.Thread 会在实例上
+        # 放同名属性，遮蔽子类方法（详见 _on_datagram 文档字符串）。若哪天又被改了名，
+        # 这里当场炸掉，而不是安静地跑 168 小时空报告。
+        if not callable(getattr(self, "_on_datagram", None)):
+            self.fatal = RuntimeError("收包回调 _on_datagram 被同名实例属性遮蔽")
+            self.lg.error("[FATAL] 收包回调不可调用：%r —— 检查方法名是否与 "
+                          "threading.Thread 的私有属性冲突", getattr(self, "_on_datagram", None))
+            self.stop.set()
+            try:
+                self.sock.close()
+            except OSError:
+                pass
+            return
+
         while not self.stop.is_set():
             try:
                 data, addr = self.sock.recvfrom(MAX_DGRAM)
@@ -698,7 +749,7 @@ class Receiver(threading.Thread):
                     self.anomalies.append(("SOCK_ERR", "WARN", str(e)))
                 continue
             try:
-                self._handle(data, addr)
+                self._on_datagram(data, addr)
             except Exception:
                 # 单包解析异常绝不能掀翻收包线程
                 if len(self.anomalies) < 200:
@@ -738,7 +789,19 @@ class Receiver(threading.Thread):
         s.settimeout(0.5)   # 只用于响应 stop，超时不是错误
         self.sock = s
 
-    def _handle(self, data: bytes, addr) -> None:
+    def _on_datagram(self, data: bytes, addr) -> None:
+        """单个数据报的解析入口。
+
+        ⚠️ 2026-10-26 血案：本方法原名 `_handle`。Python **3.13** 起
+        `threading.Thread.__init__` 会在实例上设置 `self._handle`
+        （一个 `_thread._ThreadHandle` 对象），**把同名的类方法整个遮蔽掉**。
+        表现为每次 `self._handle(...)` 抛
+        `TypeError: '_thread._ThreadHandle' object is not callable`，
+        被外层 except 吞成 PARSE_EXC 告警，统计行 `rx` 恒为 0
+        —— 看起来和"抓不到包 / IP 配错 / 防火墙拦了"**一模一样**，
+        8 小时和 168 小时都会跑出一份空报告。
+        结论：**收包线程回调不得使用 `_handle` 这个名字**，环境自检里加了硬项。
+        """
         now = datetime.now(CST)
         recv = {
             "recv_time": now.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
@@ -861,13 +924,28 @@ class Writer(threading.Thread):
         self.conn = None
         self.epochs = None
         self.anchors = BootAnchor()
+        self._anchors_seeded = False
         self.pending_rows = 0
         self.last_commit = time.monotonic()
         self.last_ckpt = time.monotonic()
         self.last_ip = {}          # device_id -> src_ip（IP_CHANGE 检测）
         self.last_progress = time.monotonic()
+        self.skew_max = 0.0        # 本机时钟与固件 NTP 时间的最大偏差（秒）
+        self._skew_warn_at = 0.0   # 下次允许记 HOST_CLK_SKEW 的 monotonic 时刻（节流）
         self.fatal = None
         self.ready = threading.Event()   # 供 T3 等"写入端已就绪"（见 StatReporter.run）
+
+    def _seed_anchors(self) -> None:
+        """首次处理前从已入库原始包恢复锚点，而不是从重启后的首包重新锚定。"""
+        if self._anchors_seeded:
+            return
+        self._anchors_seeded = True
+        if self.conn is None:
+            return
+        try:
+            seed_boot_anchors(self.conn, self.anchors, self.lg)
+        except sqlite3.Error as e:
+            self.lg.warning("[T2] BOOT+ 锚点恢复失败（退回首包重锚）：%s", e)
 
     def run(self) -> None:
         try:
@@ -880,6 +958,7 @@ class Writer(threading.Thread):
             self.conn.execute("PRAGMA user_version=1")
             self.conn.commit()
             self.epochs = EpochTracker(self.conn, self.lg)
+            self._seed_anchors()
             self.ready.set()
             while True:
                 try:
@@ -900,6 +979,9 @@ class Writer(threading.Thread):
         except Exception as e:
             self.fatal = e
             self.lg.error("[T2] 落库线程异常：\n%s", traceback.format_exc())
+            # 落库线程死了，收包再多也进不了库：必须让主循环立刻收尾并以非 0 退出，
+            # 而不是让进程继续"看起来在跑"到 8h/168h 后交出一份空报告。
+            self.stop.set()
         finally:
             if self.conn is not None:
                 self._drain()
@@ -964,6 +1046,8 @@ class Writer(threading.Thread):
 
     # ------------------------------------------------ 单包处理
     def _process(self, recv: dict) -> None:
+        if not self._anchors_seeded:
+            self._seed_anchors()
         obj = recv.get("obj") or {}
         dev = obj.get("dev") or "UNKNOWN"
         device_id = dev
@@ -996,6 +1080,28 @@ class Writer(threading.Thread):
                       "%s -> %s" % (prev_ip, recv["src_ip"]))
             self.lg.warning("[IP] %s 源地址变化：%s -> %s", device_id, prev_ip, recv["src_ip"])
         self.last_ip[device_id] = recv["src_ip"]
+
+        # ---- 主机时钟偏移（2026-10-26 新增）--------------------------------
+        # 固件 ts_ok=true 时，其 ts 来自 NTP（CST）；recv_wall 也是 CST 绝对时间。
+        # 两者之差 ≈ 本机时钟误差 + 网络时延（毫秒级）⇒ 差值大就是本机时钟错了。
+        # 只在数据行上做（心跳每秒都有，浪费），且 10 min 才记一次（避免刷爆 event_log）。
+        if ok and ptype == "data" and obj.get("ts_ok") and isinstance(obj.get("ts"), str):
+            try:
+                fw_ts = datetime.strptime(obj["ts"][:19].replace("T", " "),
+                                          "%Y-%m-%d %H:%M:%S")
+                skew = (recv["recv_wall"].replace(tzinfo=None) - fw_ts).total_seconds()
+                if abs(skew) > self.skew_max:
+                    self.skew_max = abs(skew)
+                if abs(skew) > HOST_SKEW_WARN_S and time.monotonic() >= self._skew_warn_at:
+                    self._skew_warn_at = time.monotonic() + 600.0
+                    log_event(self.conn, recv["recv_time"], "HOST_CLK_SKEW", "WARN",
+                              "本机时钟与固件 NTP 时间差 %.1f s（本机 %s / 固件 %s）"
+                              "⇒ BootAnchor 与时间序列会整体平移，必须校时"
+                              % (skew, recv["recv_time"][:19], obj["ts"][:19]))
+                    self.lg.warning("[CLK] 本机时钟与固件差 %.1f s（本机 %s）",
+                                    skew, recv["recv_time"][:19])
+            except (ValueError, TypeError):
+                pass
 
         # ---- ① 原始流水（不可再生，优先落盘）----
         self.conn.execute(
@@ -2005,7 +2111,20 @@ def verify_raw(conn, fields, limit: int = 0, out_csv: str | None = None,
             if want is None or got is None:
                 continue
             if isinstance(want, str) or isinstance(got, str):
-                if str(got) != str(want):
+                # openState 有**两种合法表示**：固件发 4 位 HEX（"00F0"），
+                # decode() 返回中文（"无锁/合闸"）。直接比字符串会**每行必错** ——
+                # 这正是 2026-10-26 那轮 8h 报告里 "checked=2000 / bad=2000"
+                # 的根因（`bad` 是字段级计数，2000/2000 = 平均每条 1 个字段），
+                # **不是数据损坏**。统一到 HEX 再比，以 raw 侧寄存器为唯一事实来源。
+                if name == "openState":
+                    try:
+                        want_s = "%04X" % (int(regs[0]) & 0xFFFF)
+                    except (IndexError, TypeError, ValueError):
+                        continue
+                    got_s = str(got).strip().upper()
+                else:
+                    want_s, got_s = str(want), str(got)
+                if got_s != want_s:
                     bad += 1
                     if len(samples) < 50:
                         samples.append((r["seq"], name, got, want, "str"))
@@ -2036,21 +2155,25 @@ def repair(conn, fields, lg) -> int:
        反推出来的，重新算会得到与实时入库不同的 collect_time，反而制造撞车。
     """
     rows = list(conn.execute(
-        "SELECT id,device_id,seq,epoch_id,payload FROM udp_packet p WHERE p.ptype='data' "
+        "SELECT id,device_id,seq,epoch_id,payload,recv_time FROM udp_packet p "
+        "WHERE p.ptype='data' "
         "AND p.parse_status='ok' AND p.epoch_id IS NOT NULL AND NOT EXISTS ("
         "  SELECT 1 FROM meter_record m WHERE m.device_id=p.device_id "
         "  AND m.epoch_id=p.epoch_id AND m.seq=p.seq) ORDER BY p.id"))
     anchors = BootAnchor()
+    seed_boot_anchors(conn, anchors, lg)
     n = 0
     for r in rows:
         if not r["payload"]:
             continue
         try:
             obj = json.loads(bytes(r["payload"]).decode("utf-8", "replace"))
-        except ValueError:
+            recv_wall = datetime.strptime(r["recv_time"],
+                                          "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=CST)
+        except (ValueError, TypeError):
             continue
         res, _q = store_json(conn, obj, r["device_id"], fields, r["epoch_id"],
-                             datetime.now(CST), anchors)
+                             recv_wall, anchors)
         if res == StoreResult.NEW:
             n += 1
     conn.commit()
@@ -2340,6 +2463,182 @@ def git_commit() -> str | None:
         return None
 
 
+# ---- 存储介质检查（跨平台）------------------------------------------------
+# 2026-10-26 砚青：原实现只读 /proc/mounts，Windows 上 OSError 被 except 吞掉 ⇒
+# **静默跳过**。而接收端计划跑 Win10 ⇒ 这条检查等于不存在。补 Windows 分支。
+#
+# 为什么介质这么要紧：SQLite 的 WAL 依赖 -shm 的共享内存映射与 OS 文件锁。
+# 网络盘 / 云同步目录 / 可移动盘上这三样都不可靠，典型表现是
+#   "database disk image is malformed" 或跑几十小时后突然 disk I/O error，
+# 而且**在坏之前一切看起来都正常**——正是长跑最怕的失败模式。
+
+_WIN_DRIVE_KIND = {0: "UNKNOWN", 1: "NO_ROOT", 2: "REMOVABLE", 3: "FIXED",
+                   4: "REMOTE", 5: "CDROM", 6: "RAMDISK"}
+
+# 云同步盘目录特征（小写匹配）。同步进程会在运行中读/回写 .db，必然损坏。
+_SYNC_DIR_HINTS = ("onedrive", "dropbox", "google drive", "googledrive",
+                   "icloud", "nutstore", "jianguoyun", "坚果云",
+                   "baidunetdisk", "百度网盘", "weiyun", "微云",
+                   "owncloud", "nextcloud", "seafile")
+
+# 只有这些本地块设备文件系统允许长跑。白名单之外的 tmpfs/overlay/fuse.* 等
+# 一律按硬项处理：WAL 依赖共享内存映射与文件锁，未知介质不能赌。
+_LOCAL_FS_OK = frozenset((
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "jfs", "reiserfs",
+    "nilfs2", "zfs", "bcachefs", "ntfs", "ntfs3", "exfat",
+))
+
+
+def _mount_unescape(s: str) -> str:
+    """解码 /proc/mounts 的八进制转义（空格 = \040，Tab = \011 ...）。"""
+    out = []
+    i = 0
+    while i < len(s):
+        if (s[i] == "\\" and i + 3 < len(s)
+                and all(c in "01234567" for c in s[i + 1:i + 4])):
+            out.append(chr(int(s[i + 1:i + 4], 8)))
+            i += 4
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+def _path_under(path: str, root: str) -> bool:
+    """按路径分隔符判断包含关系，避免 /data 误匹配 /database。"""
+    if root == "/":
+        return path.startswith("/")
+    root = root.rstrip("/\\")
+    if not root:
+        return False
+    if platform.system() == "Windows":
+        p, r = path.casefold(), root.casefold()
+        return p == r or p.startswith(r + "\\") or p.startswith(r + "/")
+    return path == root or path.startswith(root + "/")
+
+
+def _win_subst_target(root: str):
+    """subst 虚拟盘 → 真实目标；普通盘返回 None。"""
+    try:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.QueryDosDeviceW(root, buf, len(buf))
+        if n:
+            t = buf.value
+            if t.startswith("\\??\\"):
+                return t[4:]
+    except Exception:
+        return None
+    return None
+
+
+def _win_resolve(path: str) -> str:
+    """解析 symlink / junction / subst，返回真实路径；解析失败保留原路径。"""
+    try:
+        p = os.path.realpath(os.path.abspath(path))
+        for _ in range(8):
+            root = os.path.splitdrive(p)[0]
+            if not root or root.startswith("\\\\"):
+                break
+            target = _win_subst_target(root)
+            if not target:
+                break
+            p = os.path.realpath(os.path.abspath(target + p[len(root):]))
+        return p
+    except OSError:
+        return os.path.abspath(path)
+
+
+def _win_drive_info(path: str):
+    """Windows：→ (类型名, GetDriveTypeW 返回码)；失败 (None, None)。"""
+    try:
+        import ctypes
+        root = os.path.splitdrive(os.path.abspath(path))[0]
+        if not root:
+            return None, None
+        code = int(ctypes.windll.kernel32.GetDriveTypeW(root + "\\"))
+        return _WIN_DRIVE_KIND.get(code, "UNKNOWN"), code
+    except Exception:
+        return None, None
+
+
+def _sync_hint(path: str):
+    """按路径组件匹配同步盘目录；排除 Windows 用户名本身。"""
+    win = platform.system() == "Windows"
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    for i, part in enumerate(parts):
+        low = part.casefold()
+        for hint in _SYNC_DIR_HINTS:
+            h = hint.casefold()
+            if not (low == h or low.startswith(h + " ") or low.startswith(h + "-")):
+                continue
+            if win and len(parts) >= 3 and parts[0].endswith(":"):
+                if parts[1].casefold() == "users" and i == 2:
+                    continue    # C:\Users\onedrive_user 不是同步盘根
+            return hint
+    return None
+
+
+def storage_check(d: str) -> tuple:
+    """DB 目录的介质风险。→ (硬项, 软项)。平台分支 + 与平台无关的同步盘判据。"""
+    hard, soft = [], []
+    win = platform.system() == "Windows"
+    absp = _win_resolve(d) if win else os.path.realpath(os.path.abspath(d))
+
+    if win:
+        kind, code = _win_drive_info(absp)
+        if code is None:
+            hard.append("介质类型读取失败（GetDriveTypeW 不可用）—— 无法确认 DB 不在网络盘，"
+                        "不能放行")
+        elif code == 4:
+            hard.append("DB 目录在网络盘（%s / REMOTE）—— WAL 需共享内存与文件锁，"
+                        "网络盘会 disk I/O error 或静默损坏。必须放本机固定盘。" % absp)
+        elif code == 2:
+            hard.append("DB 目录在可移动盘（%s / REMOVABLE）—— 会被拔出或盘符漂移，"
+                        "不能用于长跑。" % absp)
+        elif code != 3:
+            hard.append("介质类型 = %s（code=%s，非本机固定盘）—— 不能用于长跑。" % (kind, code))
+        else:
+            soft.append("介质 = 本机固定盘（FIXED）")
+    else:
+        try:
+            fs = None
+            best = ""
+            with open("/proc/mounts", "r") as f:
+                for ln in f:
+                    parts = ln.split()
+                    if len(parts) < 3:
+                        continue
+                    mp = _mount_unescape(parts[1])
+                    if _path_under(absp, mp) and len(mp) > len(best):
+                        best, fs = mp, parts[2]
+            if fs is None:
+                hard.append("文件系统未能判定（%s 不在 /proc/mounts 的挂载点内）—— "
+                            "介质无法验证，不能放行" % d)
+            elif fs.lower() in _LOCAL_FS_OK:
+                soft.append("文件系统 %s（挂载点 %s）" % (fs, best))
+            else:
+                hard.append("DB 所在文件系统是 %s（挂载点 %s）—— 不是白名单内的本地块设备"
+                            "文件系统，WAL 的共享内存与锁不可靠，必须放本机 ext4/xfs。"
+                            % (fs, best))
+        except OSError as e:
+            hard.append("无法读取 /proc/mounts（%s）—— 介质无法验证，不能放行" % e)
+
+    hint = _sync_hint(absp)
+    if hint:
+        hard.append("DB 目录疑似在云同步盘（路径命中「%s」）—— 同步进程会在运行中"
+                    "读/回写数据库文件，长跑必然损坏。必须换到非同步目录。" % hint)
+
+    if win:
+        for env_name in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+            root = os.environ.get(env_name)
+            if root and _path_under(absp, _win_resolve(root)):
+                hard.append("DB 目录位于 %s 指定的云同步根目录下 —— 必须换到非同步目录。"
+                            % env_name)
+                break
+    return hard, soft
+
+
 def env_check(db_path: str, port: int) -> tuple:
     """长跑环境自检。→ (硬项失败列表, 软项提示列表)
 
@@ -2351,8 +2650,26 @@ def env_check(db_path: str, port: int) -> tuple:
 
     if sys.version_info < (3, 8):
         hard.append("Python %s < 3.8" % platform.python_version())
+    elif sys.version_info >= (3, 13):
+        soft.append("Python %s（3.13 起 threading.Thread 新增实例属性 _handle，"
+                    "已确认本版本回调改名规避；升级 Python 时仍需重跑 --env-check）"
+                    % platform.python_version())
     else:
         soft.append("Python %s" % platform.python_version())
+
+    # 功能性自检：收包回调必须真的可调用。
+    # Python 3.13 的 threading.Thread 会在实例上挂 _handle 属性，遮蔽同名子类方法，
+    # 结果是 rx 恒 0、看起来像"抓不到包"（2026-10-26 实测踩到，见 _on_datagram 注释）。
+    try:
+        _probe = Receiver(port, queue.Queue(maxsize=1), Stats(), threading.Event(),
+                          None, logging.getLogger("env_check"))
+        if not callable(getattr(_probe, "_on_datagram", None)):
+            hard.append("收包回调 _on_datagram 不可调用（被同名实例属性遮蔽）"
+                        "—— 收包会恒为 0，必须改方法名")
+        else:
+            soft.append("收包回调可调用")
+    except Exception as e:                                  # 构造失败本身也是硬项
+        hard.append("无法构造 Receiver 做回调自检：%r" % (e,))
 
     sv = sqlite3.sqlite_version_info
     if sv < (3, 24):
@@ -2383,21 +2700,10 @@ def env_check(db_path: str, port: int) -> tuple:
     except OSError:
         pass
 
-    try:
-        fs = None
-        with open("/proc/mounts", "r") as f:
-            best = ""
-            for ln in f:
-                parts = ln.split()
-                if len(parts) >= 3 and d.startswith(parts[1]) and len(parts[1]) > len(best):
-                    best, fs = parts[1], parts[2]
-        if fs and fs.lower() in ("nfs", "nfs4", "cifs", "smbfs", "vfat", "msdos", "fuseblk"):
-            hard.append("DB 所在文件系统是 %s —— WAL 的共享内存与锁不可靠，"
-                        "会报 disk I/O error。必须放本机 ext4/xfs。" % fs)
-        elif fs:
-            soft.append("文件系统 %s" % fs)
-    except OSError:
-        pass
+    # 介质检查走 storage_check()（2026-10-26：原 /proc/mounts 在 Windows 静默跳过）
+    _sh, _ss = storage_check(d)
+    hard.extend(_sh)
+    soft.extend(_ss)
 
     try:
         db_proto.load_dict()

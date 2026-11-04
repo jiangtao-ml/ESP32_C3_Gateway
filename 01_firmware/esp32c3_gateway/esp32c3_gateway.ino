@@ -51,6 +51,14 @@
 #include <stdarg.h>   // 仅标准库：vsnprintf 追加式组包（非第三方库）
 #include <lwip/apps/sntp.h>   // sntp_getserver() / sntp_getreachability()：读取实际生效的 NTP 源（ESP32 core 自带，非第三方库）
 
+// ---- 商用级加固 2026-10-27 砚青（对应 Codex 复核报告的固件四条）----
+//   编号沿用 Codex 原报告：P0-1 时钟回退钳位 / P0-2 心跳诚实化 / P0-3 看门狗+复位原因 / P0-4 版本自报
+//   ⚠️ 与 02_docs/29 的 P0 序号不同（29 号文里看门狗写作 P0-3、钳位写作 P0-1，此处已对齐 Codex 原文）
+#include <esp_task_wdt.h>     // P0-3：esp_task_wdt_init/add/reset（**IDF 5.5 只有新签名**，见 config.h FW_WDT_*）
+#include <esp_system.h>       // P0-3：esp_reset_reason() / esp_reset_reason_t
+#include <esp_attr.h>         // P0-3：RTC_NOINIT_ATTR（boot 计数放 RTC 保留区，软复位不清零）
+#include <sys/time.h>         // P0-1：settimeofday()（时钟回拉）
+
 #include "config.h"
 #include "secrets.h"
 
@@ -89,6 +97,31 @@ static bool         g_timeSynced       = false;
 static bool         g_ntpResyncPending = false;  // 重连成功后置位，下一轮重新触发 SNTP
 static bool         g_ntpTriggeredThisSession = false;  // 本轮会话是否已发起过 SNTP 对时（「已同步」判据之一）
 static uint32_t     g_ntpStatusReprintMs      = 0;      // 同步确认后补打一次源状态的计划时刻（0 = 无需补打）
+
+// ---------------------------------------------------------------
+// 【商用级加固 2026-10-27 · P0-3】复位原因与 boot 计数
+//   目的：让心跳能区分"人为拔电 / 看门狗 / panic / 软复位 / 欠压"。
+//   现状（批次 3 及之前）**没有任何手段** —— 2026-10-26 那次 21:41:38 复位
+//   只能靠人工回忆"换过 USB 供电线"才定性，否则就是一条无从追查的玄学复位。
+//   ⚠️ RTC_NOINIT_ATTR 区**上电时是随机值**（不掉电则保留），必须先校验 magic，
+//      否则首次上电会把随机数当成上次计数（可能读到 40 亿，报告直接失真）。
+// ---------------------------------------------------------------
+//   ⚠️ volatile：bootInfoInit() 里 count 与 magic 的**写入顺序**是正确性的一部分（见该函数），
+//      若不加 volatile，编译器可以按任意顺序重排这两个独立存储，「magic 最后写」的保证就失效。
+RTC_NOINIT_ATTR static volatile uint32_t g_bootMagic;   // = FW_BOOT_CNT_MAGIC 才认为后面的计数有效
+RTC_NOINIT_ATTR static volatile uint32_t g_bootCount;   // 本次上电周期内的第几次启动（1 起）
+static const char *g_resetReasonStr = "UNKNOWN";   // esp_reset_reason() 的可读映射
+static uint32_t    g_bootCountNow   = 0;           // 本次启动序号（上心跳 boot 字段）
+static uint32_t    g_txFails        = 0;           // P0-2：udpSendLine() 真失败次数（上心跳 tx_fail）
+
+// ---------------------------------------------------------------
+// 【商用级加固 2026-10-27 · P0-1】时钟护栏状态
+// ---------------------------------------------------------------
+static time_t   g_clkLastGood     = 0;      // 上次被接受的墙上时间（判断"回退"的基准）
+static uint32_t g_clkHoldCount    = 0;      // 被拦下的回退次数（上心跳 clk_hold）
+static int32_t  g_clkLastBackS    = 0;      // 最近一次被拦的回退秒数（上心跳 clk_back）
+static bool     g_clkGuardPending = false;  // 已发起 SNTP，等回包后做一次钳位判定
+static time_t   g_tsLastEmitted   = 0;      // 本会话已发出的最大 ts（epoch 秒）；ts 严格递增护栏用
 
 static WiFiUDP g_udp;
 static char    g_payload[QI_UDP_PAYLOAD_MAX];   // 批次 1：384 -> 1024 -> 1200（§8.2 ②：含 raw 78B HEX 的最坏行 1106 B，小缓冲会静默截断）
@@ -369,7 +402,10 @@ static void wifiTick() {
     if (!g_linkUp) {
       g_linkUp        = true;
       g_everConnected = true;
-      g_reconnectCount = 0;
+      // 【2026-10-27 第二审查者复核修复】原此处 g_reconnectCount = 0; 使心跳 reconn **恒为 0**：
+      //   上行只在 g_linkUp==true 时发送，而清零恰好发生在 linkUp false->true 的同一轮，
+      //   所以任何一条心跳读到的都是 0（02_docs/21 FR-11 要求计数器单调递增）。
+      //   改为**本次启动内累计**，不再清零；串口「第 N 次重连」随之变为累计序号。
       Serial.printf("[WIFI] 已连接 SSID=%s RSSI=%d dBm IP=%s GW=%s\n",
                     WiFi.SSID().c_str(), (int)WiFi.RSSI(),
                     WiFi.localIP().toString().c_str(), WiFi.gatewayIP().toString().c_str());
@@ -429,6 +465,163 @@ static bool ntpHasReply() {
   return false;
 }
 
+// ---------------------------------------------------------------
+// 【商用级加固 2026-10-27 · P0-3】复位原因映射
+//   枚举名取自本机 framework-arduinoespressif32-libs/esp32c3 的 esp_system.h（已逐个核对）。
+//   ★ 对我方现场最有区分价值的两条：
+//     BROWNOUT / PWR_GLITCH ⇒ 供电不稳（充电宝电压跌落），不是固件问题；
+//     USB                   ⇒ USB 外设复位，插拔/更换 USB 线会落这里。
+// ---------------------------------------------------------------
+static const char *resetReasonStr(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:    return "POWERON";     // 真实上电/断电重启（人为拔电最可能落这里）
+    case ESP_RST_EXT:        return "EXT";         // 外部复位脚
+    case ESP_RST_SW:         return "SW";          // esp_restart()：本固件 /reset 与保存后重启走这条
+    case ESP_RST_PANIC:      return "PANIC";       // 异常 / Guru Meditation
+    case ESP_RST_INT_WDT:    return "INT_WDT";     // 中断看门狗
+    case ESP_RST_TASK_WDT:   return "TASK_WDT";    // 任务看门狗（P0-3 启用后主要自愈路径）
+    case ESP_RST_WDT:        return "WDT";         // 其他看门狗
+    case ESP_RST_DEEPSLEEP:  return "DEEPSLEEP";   // 深睡唤醒（本固件不用）
+    case ESP_RST_BROWNOUT:   return "BROWNOUT";    // 欠压 ★充电宝电压跌落
+    case ESP_RST_SDIO:       return "SDIO";
+    case ESP_RST_USB:        return "USB";         // ★USB 外设复位（插拔/换 USB 线）
+    case ESP_RST_JTAG:       return "JTAG";
+    case ESP_RST_EFUSE:      return "EFUSE";
+    case ESP_RST_PWR_GLITCH: return "PWR_GLITCH";  // ★电源毛刺
+    case ESP_RST_CPU_LOCKUP: return "CPU_LOCKUP";
+    default:                 return "UNKNOWN";
+  }
+}
+
+// 在 setup() 里 Serial 就绪后调用一次
+static void bootInfoInit() {
+  g_resetReasonStr = resetReasonStr(esp_reset_reason());
+
+  if (g_bootMagic != FW_BOOT_CNT_MAGIC) {
+    // RTC 保留区未被本固件写过 ⇒ 真·冷启动（断电 / 首次上电），计数从 1 重新开始。
+    // 【2026-10-27 第二审查者复核修复】写入顺序必须是 **先 count、后 magic**（magic 作提交标记）：
+    //   原顺序先写 magic 再写 count，若恰好在这两条 store 之间掉电，下次上电 magic 仍有效、
+    //   count 却是随机值，随后 count++ 会把随机数（可能 40 亿）当成启动序号上报。
+    //   改为 count 先写、magic 最后写：中途掉电 ⇒ magic 不匹配 ⇒ 下次仍按冷启动重建为 1。
+    //   （两个变量均为 volatile，保证这两条 store 不被编译器重排。）
+    g_bootCount = 1;
+    g_bootMagic = FW_BOOT_CNT_MAGIC;
+  } else if (g_bootCount < 0xFFFFFFFFUL) {
+    // 用赋值而非 ++：C++20 起对 volatile 类型做 ++ 会触发 -Wvolatile 警告（本轮实测出现过）。
+    g_bootCount = g_bootCount + 1;    // 软复位 / 看门狗：RTC 区仍在，计数累加
+  }
+  g_bootCountNow = g_bootCount;
+
+  Serial.printf("[BOOT] reset_reason=%s boot_count=%lu（%s）\n",
+                g_resetReasonStr, (unsigned long)g_bootCountNow,
+                (g_bootCountNow <= 1)
+                  ? "RTC 保留区已重建 => 真断电/首次上电"
+                  : "RTC 保留区仍在 => 软复位或看门狗，未断电");
+}
+
+// ---------------------------------------------------------------
+// 【商用级加固 2026-10-27 · P0-3】任务看门狗（TWDT）
+//   ⚠️ IDF 5.5 只有 esp_task_wdt_init(const esp_task_wdt_config_t *)；
+//      旧写法 esp_task_wdt_init(uint32_t, bool) 在本 framework 的头文件里**没有声明**（已 grep 核实）。
+//   ⚠️ idle_core_mask = 0：**不**订阅 idle 任务。WiFi/SNTP 内部偶发长阻塞不该触发整机重启，
+//      要盯的是 loop() 自己卡死。
+// ---------------------------------------------------------------
+static bool g_wdtOn = false;
+
+static void wdtInit() {
+#if FW_WDT_ENABLE
+  esp_task_wdt_config_t cfg = {};
+  cfg.timeout_ms     = FW_WDT_TIMEOUT_MS;
+  cfg.idle_core_mask = 0;
+  cfg.trigger_panic  = true;            // 超时 => panic => 重启，下次启动留下 TASK_WDT
+
+  esp_err_t e = esp_task_wdt_init(&cfg);
+  if (e == ESP_ERR_INVALID_STATE) {
+    // 已被 core / SDK 初始化过 ⇒ 改用 reconfigure 覆盖超时
+    e = esp_task_wdt_reconfigure(&cfg);
+  }
+  if (e != ESP_OK) {
+    Serial.printf("[WDT][WARN] 初始化失败 err=%d，看门狗未启用（不影响采集）\n", (int)e);
+    return;
+  }
+
+  e = esp_task_wdt_add(NULL);           // NULL = 当前任务（loopTask）
+  if (e == ESP_ERR_INVALID_ARG) e = ESP_OK;   // 已订阅过（重复 add）⇒ 视为成功
+  if (e != ESP_OK) {
+    Serial.printf("[WDT][WARN] 订阅 loopTask 失败 err=%d，看门狗未生效\n", (int)e);
+    return;
+  }
+
+  g_wdtOn = true;
+  Serial.printf("[WDT] 任务看门狗已启用：%lu ms，超时=>panic 重启（reset_reason 将记 TASK_WDT）\n",
+                (unsigned long)FW_WDT_TIMEOUT_MS);
+#endif
+}
+
+// 每轮 loop() 开头喂一次。正常轮次耗时 <1s，30s 窗口有两个数量级余量。
+static inline void wdtFeed() {
+#if FW_WDT_ENABLE
+  if (g_wdtOn) esp_task_wdt_reset();
+#endif
+}
+
+// ---------------------------------------------------------------
+// 【商用级加固 2026-10-27 · P0-1】时钟回退钳位（拆 CLOCK_STEP 死结）
+//   完整背景、以及"为什么源头+兜底双保险缺一不可"见 config.h 的 FW_CLK_* 注释段。
+// ---------------------------------------------------------------
+static void ntpApplyWithGuard(const char *why) {
+  configTzTime(NTP_TZ_INFO, g_ntpPrimary, NTP_SERVER_2, NTP_SERVER_3);
+#if FW_CLK_GUARD_ENABLE
+  g_clkGuardPending = true;   // SNTP 异步：真正的判定放到下一次 ntpClampTick()
+#endif
+  (void)why;
+}
+
+// 每轮 loop() 都调用 —— **刻意不放在 ntpTick() 的 200ms 节流之后**，
+// 目的是把"SNTP 已改时钟 → 我们拉回"之间的漏网窗口压到单次 loop 迭代（微秒级），
+// 否则回包后的头 200ms 内 stateTick() 可能已经用倒退的 ts 发出一行。
+static void ntpClampTick() {
+#if FW_CLK_GUARD_ENABLE
+  if (!g_clkGuardPending) return;
+  if (!ntpHasReply()) return;             // 还没有 NTP 回包：此时时钟不可信，不能当基准
+
+  const time_t now = time(nullptr);
+  if (now < (time_t)1600000000) return;   // 时钟未就绪（早于 2020-09），不参与判定
+
+  g_clkGuardPending = false;
+
+  if (g_clkLastGood == 0) {               // 首次拿到可信时间：直接接受并作为基线
+    g_clkLastGood = now;
+    return;
+  }
+  if (now < g_clkLastGood) {
+    const int32_t back = (int32_t)(g_clkLastGood - now);
+    if (back <= FW_CLK_BACK_HOLD_S) {
+      // 小幅回退 ⇒ 拉回旧值：既保住已发出的 ts 不倒退，也不让偏差单向累积
+      // 【2026-10-27 第二审查者复核修复】计数与最近值只统计**真的被拦下**的回退：
+      //   原实现在阈值判断之前就自增，导致「大幅回退被接受」也计入 clk_hold，
+      //   而 02_docs/24 Y-4 的交叉证据判据是「clk_hold>0 且 CLOCK_STEP=0 ⇒ 钳位生效」，
+      //   混入被放行的事件会让该判据**假阳性**（看起来拦住了、其实放行了）。
+      g_clkHoldCount++;
+      g_clkLastBackS = back;
+      struct timeval tv;
+      tv.tv_sec  = g_clkLastGood;
+      tv.tv_usec = 0;
+      settimeofday(&tv, nullptr);
+      Serial.printf("[CLK] 拦下 NTP 回退 %lds（保持 %ld），累计 %lu 次\n",
+                    (long)back, (long)g_clkLastGood, (unsigned long)g_clkHoldCount);
+      return;                             // ⚠️ g_clkLastGood 保持不变
+    }
+    // 大幅回退 ⇒ 视为时钟真错（例如 RTC 被彻底打乱），接受并重建基线，避免永久卡在旧时间。
+    //   ⚠️ 本分支**不计入 clk_hold**（语义见上）：当前版本对「接受了大回退」没有心跳证据，
+    //      只有串口日志（真机拔 USB 时看不到）。要让它可观测需新增心跳字段（B 类，等拍板）。
+    Serial.printf("[CLK][WARN] 回退 %lds 超过阈值 %ds，接受（疑似时钟真错）\n",
+                  (long)back, (int)FW_CLK_BACK_HOLD_S);
+  }
+  g_clkLastGood = now;
+#endif
+}
+
 // JSON 时间戳（ISO8601，批次 1 3.7）：已对时 -> "YYYY-MM-DDTHH:MM:SS"；未对时 -> "BOOT+<秒>"。
 // 返回 true = 本轮会话确已收到 NTP 回包（即 JSON 的 ts_ok = true）。
 // 判据仍是 ntpHasReply()（本轮会话确实收到过 NTP 回包），不得改回"用 getLocalTime() 判同步"：
@@ -438,6 +631,28 @@ static bool ntpHasReply() {
 static bool buildTimestampIso(char *out, size_t outSize) {
   struct tm now;
   if (ntpHasReply() && getLocalTime(&now, 0)) {   // 0 = 不阻塞等待
+#if FW_TS_MONOTONIC_ENABLE
+    // 【P0-1 ②】ts 严格递增护栏：同一会话内 ts 绝不倒退。
+    //   ⚠️ 只在"会倒退"时用 last+1 跳过；**同秒保持原样、不额外 +1** ——
+    //      同秒是"1 Hz + 秒级精度"的分辨率伪影（接收端记 TS_SAME_SECOND/INFO，8h 实测 6 次），
+    //      若同秒也 +1，一旦轮询周期略快于 1 s 就会每轮 +1 并**持续累积超前**。
+    //      ⇒ 只在 cur < last（真倒退）时补救，其余路径与原实现逐位一致。
+    const time_t cur = time(nullptr);
+    if (cur >= (time_t)1600000000) {              // 时钟有效（晚于 2020-09）才参与护栏
+      time_t emit = cur;
+      if (g_tsLastEmitted != 0 && cur < g_tsLastEmitted) {
+        emit = g_tsLastEmitted + 1;               // 跳过已被占用的秒
+        Serial.printf("[CLK] ts 护栏：时钟回退，%ld -> %ld（跳过 1s，防 CLOCK_STEP）\n",
+                      (long)cur, (long)emit);
+      }
+      struct tm fixed;
+      time_t t = emit;
+      localtime_r(&t, &fixed);
+      strftime(out, outSize, "%Y-%m-%dT%H:%M:%S", &fixed);
+      g_tsLastEmitted = emit;
+      return true;
+    }
+#endif
     strftime(out, outSize, "%Y-%m-%dT%H:%M:%S", &now);
     return true;
   }
@@ -495,7 +710,7 @@ static void ntpTick() {
     // ⚠️ 必须在 WiFi 连上之后调用：网络未就绪时 SNTP 初始化会失败，表现为永不对时
     g_lastNtpTriggerMs        = millis();
     g_ntpTriggeredThisSession = true;
-    configTzTime(NTP_TZ_INFO, g_ntpPrimary, NTP_SERVER_2, NTP_SERVER_3);   // 批次 3：主源为运行时变量
+    ntpApplyWithGuard("首次/重连后对时");   // P0-1：统一走护栏入口（内部仍是 configTzTime）
     Serial.printf("[NTP] WiFi 已连上 -> 触发 SNTP 对时 TZ=%s 主=%s 备1=%s 备2=%s\n",
                   NTP_TZ_INFO, g_ntpPrimary, NTP_SERVER_2, NTP_SERVER_3);
   }
@@ -512,7 +727,7 @@ static void ntpTick() {
   if (g_linkUp && !ntpConfirmed &&
       (uint32_t)(millis() - g_lastNtpTriggerMs) >= NTP_RETRY_INTERVAL_MS) {
     g_lastNtpTriggerMs = millis();
-    configTzTime(NTP_TZ_INFO, g_ntpPrimary, NTP_SERVER_2, NTP_SERVER_3);   // 批次 3：主源为运行时变量
+    ntpApplyWithGuard("未同步重试");        // P0-1：统一走护栏入口（内部仍是 configTzTime）
     Serial.printf("[NTP] 仍未同步（本轮未收到 NTP 回包），重试 SNTP（周期 %lu ms）\n",
                   (unsigned long)NTP_RETRY_INTERVAL_MS);
   }
@@ -613,7 +828,8 @@ static inline const char *qiDataSegTag() {
 }
 
 // 换算口径 = 05_hardware/STB3-125_字段字典.csv 的 conv 列：
-//   raw/10、raw/1000、raw-40、raw/100、raw*0.01、1:1、高字、(H*65536)/1000+L
+//   raw/10、raw/1000、raw-40、raw/100、raw*0.01、1:1、高字、(H*65536+L)/1000
+//   ⚠️ 电量公式已于 2026-10-27 定案（D-10，见 02_docs/31）：旧口径 `(H*65536)/1000+L` 作废。
 // invalid 口径 = 06_tests/db_proto.py 的 L2 语义：
 //   A/B/C_temp == -40 = "已知不上报"（QI_PHASE_TEMP_ABSENT=1 时**不进** invalid、不降 quality）；
 //   其余越界（含 A/B/C_temp 真越界 < -40 或 > 160）才算本次异常（N_temp 不参与 "== -40" 判定）。
@@ -651,10 +867,12 @@ static bool buildDataJson(const char *ts, bool tsOk) {
     pQ[i]     = rR;                           // VAR （1:1）
     pS[i]     = rA;                           // VA  （1:1）
     pH[i]     = rH;                           // 高字
-    // 电量公式存疑（与 06_tests/db_proto.py 文件头一致）：
-    //   文档 / 字段字典写 (H*65536)/1000 + L；若该字段真实语义是"32 位累加器、单位 0.001 度"，
-    //   正确式应为 (H*65536 + L)/1000 —— 两者相差 1000 倍。此处按文档实现，不擅自改口径。
-    pEnergy[i] = (double)rH * 65536.0 / 1000.0 + (double)rL;   // 度
+    // 【2026-10-27 砚青 · D-10 定案，见 02_docs/31_电量公式勘误】旧式 `(H*65536)/1000 + L` **错误**：
+    //   ① 把低字 L 当"度"直接相加 ⇒ 整体放大 1000 倍（L 每 +1 错式 +1.000 度，实际只 +0.001 度）；
+    //   ② 量纲不一致：同一 32 位累加器的高字贡献 65.536 度/步、低字贡献 1 度/步，差 1000 倍；
+    //   ③ L 由 65535 -> 0（H+1，**正常进位**）时错式暴跌 65469.464 度 ⇒ 打穿"电量单调性"判据。
+    //   正确式 = 把高低字当成**一个 32 位累加器**整体除 1000：raw 单位 = Wh ⇒ 结果单位 = 度(kWh)。
+    pEnergy[i] = ((double)rH * 65536.0 + (double)rL) / 1000.0;   // 度（raw 单位 Wh）
 
     char nm[12];
     if (pTemp[i] == -40) {
@@ -682,7 +900,7 @@ static bool buildDataJson(const char *ts, bool tsOk) {
 
   const uint16_t rPower = qiReg(34), rQ = qiReg(35), rS = qiReg(36);
   const uint16_t rH     = qiReg(37), rL = qiReg(38);
-  const double   energy = (double)rH * 65536.0 / 1000.0 + (double)rL;   // 度（公式同上，存疑）
+  const double   energy = ((double)rH * 65536.0 + (double)rL) / 1000.0;   // 度（D-10 定案，见 02_docs/31）
 
   char rawHex[QI_RAW_HEX_MAX];
   bytesToHex(g_merged, QI_MERGED_LEN, rawHex, sizeof(rawHex));
@@ -738,22 +956,40 @@ static bool buildDataJson(const char *ts, bool tsOk) {
 // ---------------------------------------------------------------
 // ---------------------------------------------------------------
 // 批次 1 - 心跳行（每轮都发，独立一类）
-//   seq / dev / ts / ts_ok / type / rssi / free_heap / 计数器（queue、dropped 本批固定 0）
+//   原字段：seq / dev / ts / ts_ok / type / rssi / free_heap / mode / poll_ok / poll_err / udp_tx
 //   与 02_docs/17 3.2 老师原串的差异：去掉 cfg 字段、新增 dev（本批命名要求）。
+//
+// 【商用级加固 2026-10-27 · P0-2 心跳诚实化 + P0-4 版本自报】
+//   ⚠️ queue / dropped 由 `0` 改为 `null`：本固件**没有发送队列**（UDP 走同步 sendto，
+//      不存在排队缓冲），此前恒发 0 属于"看起来有能力、实际不存在"的假数据。
+//      改为 null 后语义 = "本设备无此能力"，与"队列当前为空（=0）"严格区分。
+//      接收端不受影响：udp_collect.py 的 HB_REQUIRED 不含这两个键，且只对
+//      poll_ok / poll_err / udp_tx 做 isinstance(int) 判定（已核对 line 120、line 1060）。
+//   新增真实计数：tx_fail（udpSendLine 真失败）/ reconn（WiFi 重连次数）/ up（开机秒数）
+//   新增诊断字段：fw（P0-4 版本自报）/ reset + boot（P0-3 复位原因与启动序号）
+//                 clk_hold + clk_back（P0-1 被拦下的时钟回退次数与最近秒数）
 // ---------------------------------------------------------------
 static bool buildHeartbeatJson(const char *ts, bool tsOk) {
   size_t pos   = 0;
   bool   trunc = false;
   ++g_seq;                                    // 每发一行自增 1（uint32_t 回绕正常）
   appendf(g_payload, sizeof(g_payload), &pos, &trunc,
-          "{\"seq\":%lu,\"dev\":\"%s\",\"ts\":\"%s\",\"ts_ok\":%s,\"type\":\"hb\","
+          "{\"seq\":%lu,\"dev\":\"%s\",\"fw\":\"%s\",\"ts\":\"%s\",\"ts_ok\":%s,\"type\":\"hb\","
           "\"rssi\":%d,\"free_heap\":%u,\"mode\":\"%s\",\"poll_ok\":%lu,\"poll_err\":%lu,\"udp_tx\":%lu,"
-          "\"queue\":%u,\"dropped\":%u}",
-          (unsigned long)g_seq, g_devStr, ts, tsOk ? "true" : "false",
+          "\"queue\":null,\"dropped\":null,"
+          "\"tx_fail\":%lu,\"reconn\":%lu,\"up\":%lu,"
+          "\"reset\":\"%s\",\"boot\":%lu,\"clk_hold\":%lu,\"clk_back\":%ld}",
+          (unsigned long)g_seq, g_devStr, FW_VERSION, ts, tsOk ? "true" : "false",
           (int)WiFi.RSSI(), (unsigned)ESP.getFreeHeap(),
           (g_readMode == 0) ? "full" : "3seg",
           (unsigned long)g_pollOk, (unsigned long)g_pollErr, (unsigned long)g_udpTx,
-          (unsigned)0, (unsigned)0);
+          (unsigned long)g_txFails,
+          (unsigned long)g_reconnectCount,
+          (unsigned long)(millis() / 1000UL),
+          g_resetReasonStr,
+          (unsigned long)g_bootCountNow,
+          (unsigned long)g_clkHoldCount,
+          (long)g_clkLastBackS);
   return !trunc;
 }
 
@@ -801,6 +1037,7 @@ static bool udpSendLine() {
   if (ok) {
     g_udpTx++;
   } else {
+    g_txFails++;     // 【P0-2】真实发送失败计数 → 心跳 tx_fail（与 udp_tx 一起构成"发了多少/失了多少"）
     Serial.printf("[UDP][ERR] 发送失败（beginPacket/endPacket 未返回 1），目标 %s:%u\n",
                   g_udpTargetIp, (unsigned)g_udpTargetPort);
   }
@@ -1303,6 +1540,10 @@ void setup() {
   // 仅在 setup 内有界等待（最多 2s），不影响 loop() 的非阻塞约束。
   for (uint32_t t0 = millis(); !Serial && (uint32_t)(millis() - t0) < 2000; ) delay(10);
 
+  // 【商用级加固 2026-10-27 · P0-3】尽早记录复位原因与 boot 序号。
+  //   必须在 Serial 就绪之后（否则这条日志会丢），且在任何可能触发重启的操作之前。
+  bootInfoInit();
+
   // ---- WiFi：静态 IP + 最小自恢复 ----
   WiFi.mode(WIFI_AP_STA);                   // 批次 3：STA + 常驻 SoftAP（AP 常开，见 web_config.h 已记录的口子①）
 
@@ -1395,10 +1636,18 @@ void setup() {
 #endif
 
   g_nextPollMs = millis() + g_pollIntervalMs;
+
+  // 【商用级加固 2026-10-27 · P0-3】看门狗放在 setup **最末尾**才启用：
+  //   setup 期间（SoftAP / WebServer 初始化、WiFi.begin 首次拉起）耗时不确定，
+  //   提前开会可能被误杀；一旦进入 loop() 每轮喂狗，30s 窗口足以覆盖任何正常轮次。
+  wdtInit();
+
   Serial.println("[BOOT] M5+批次1+批次2+批次3 就绪：WiFi + NTP + UDP（JSON 上行：每轮 1 行心跳含 mode；全成功再加 1 行数据，含 raw 78 字节 HEX）+ 485 运行时自适应（默认一帧读全，连续失败 3 轮自动降级 3 段）+ 常驻 AP/Web 配置页//status/NVS（保存立即生效）");
 }
 
 void loop() {
+  wdtFeed();      // 【P0-3】先喂狗：本轮耗时可忽略，保证 30s 窗口内必有一次喂狗
+  ntpClampTick(); // 【P0-1】时钟回退钳位：**不受 ntpTick 的 200ms 节流限制**，尽量缩小漏网窗口
   wifiTick();     // WiFi 状态检查与节流重连
   ntpTick();      // 对时状态检测 / 重连后重新对时
   stateTick();    // IDLE -> TX -> WAIT_RX -> PARSE -> SEND

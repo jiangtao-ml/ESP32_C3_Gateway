@@ -1,0 +1,365 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1080" viewBox="0 0 1440 1080" font-family="'Microsoft YaHei','PingFang SC','Noto Sans CJK SC',sans-serif">
+  <defs>
+    <pattern id="perf" width="25.4" height="25.4" patternUnits="userSpaceOnUse" patternTransform="translate(60 130)">
+      <circle cx="12.7" cy="12.7" r="4.3" fill="#a9bfa0"/>
+    </pattern>
+    <linearGradient id="pcbG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e5efdc"/>
+      <stop offset="1" stop-color="#d3e1c7"/>
+    </linearGradient>
+    <linearGradient id="modG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#26509e"/>
+      <stop offset="1" stop-color="#17356e"/>
+    </linearGradient>
+    <linearGradient id="espG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#33373e"/>
+      <stop offset="1" stop-color="#1b1e23"/>
+    </linearGradient>
+    <linearGradient id="termG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d9468"/>
+      <stop offset="1" stop-color="#22694a"/>
+    </linearGradient>
+    <filter id="sh" x="-15%" y="-15%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0b1a2b" flood-opacity="0.14"/>
+    </filter>
+    <style>
+      .lbl { stroke:#f6faf1; stroke-width:4; paint-order:stroke; stroke-linejoin:round; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="1080" fill="#f4f6f9"/>
+
+  <!-- ============ 标题 ============ -->
+  <text x="60" y="54" font-size="30" font-weight="700" fill="#111827">ESP32-C3 ＋ MAX13487 · 洞洞板直焊装配示意</text>
+  <text x="60" y="84" font-size="14.5" fill="#4b5563">70 × 90 mm 双面镀锡万用板 ｜ 无排母 · 模块引脚穿板直焊 · 焊上即不可拆 ｜ L1 实验室样机</text>
+  <line x1="60" y1="102" x2="1380" y2="102" stroke="#d6dde8" stroke-width="1.5"/>
+
+  <!-- ============ 洞洞板 ============ -->
+  <rect x="60" y="130" width="900" height="700" rx="5" fill="url(#pcbG)" stroke="#94ad8b" stroke-width="2" filter="url(#sh)"/>
+  <rect x="60" y="130" width="900" height="700" rx="5" fill="url(#perf)"/>
+
+  <!-- 安装孔 -->
+  <g>
+    <circle cx="120" cy="190" r="16" fill="#ffffff" stroke="#7c8a99" stroke-width="2"/>
+    <circle cx="900" cy="190" r="16" fill="#ffffff" stroke="#7c8a99" stroke-width="2"/>
+    <circle cx="120" cy="770" r="16" fill="#ffffff" stroke="#7c8a99" stroke-width="2"/>
+    <circle cx="900" cy="770" r="16" fill="#ffffff" stroke="#7c8a99" stroke-width="2"/>
+    <text class="lbl" x="148" y="184" font-size="12.5" fill="#4a5f52">4 × ⌀3.2 安装孔（M3 自攻）</text>
+    <text class="lbl" x="148" y="203" font-size="12.5" fill="#4a5f52">距板边 ≥5 mm · 焊之前钻</text>
+  </g>
+
+  <!-- ============ 端子 J5 (3P 5.08) ============ -->
+  <rect x="80" y="404" width="102" height="152" rx="4" fill="url(#termG)" stroke="#155038" stroke-width="2"/>
+  <g fill="#0e3b28">
+    <rect x="92" y="412" width="70" height="44" rx="3"/>
+    <rect x="92" y="462.8" width="70" height="44" rx="3"/>
+    <rect x="92" y="513.6" width="70" height="44" rx="3"/>
+  </g>
+  <g fill="#d9f2e3" font-size="15" font-weight="700" text-anchor="middle">
+    <text x="127" y="441">1</text>
+    <text x="127" y="492">2</text>
+    <text x="127" y="543">3</text>
+  </g>
+  <g fill="#9fdcbb">
+    <circle cx="86" cy="430" r="5"/>
+    <circle cx="86" cy="480.8" r="5"/>
+    <circle cx="86" cy="531.2" r="5"/>
+  </g>
+  <text class="lbl" x="131" y="592" font-size="13.5" font-weight="700" fill="#17442e" text-anchor="middle">端子 J5</text>
+  <text class="lbl" x="131" y="611" font-size="12" fill="#3a6552" text-anchor="middle">3P · 5.08 mm</text>
+  <text class="lbl" x="131" y="629" font-size="12" fill="#3a6552" text-anchor="middle">出线朝板外（左）</text>
+
+  <!-- ============ MAX13487 模块 ============ -->
+  <rect x="360" y="350" width="220" height="200" rx="4" fill="url(#modG)" stroke="#0f1f45" stroke-width="2" filter="url(#sh)"/>
+  <text x="470" y="270" font-size="15" font-weight="700" fill="#1a2f5c" text-anchor="middle">MAX13487 模块（蓝板 RS485 V2.05）</text>
+  <text x="470" y="289" font-size="11.5" fill="#5a6b8c" text-anchor="middle">板载已有 472 / 121 / 472，勿外加</text>
+  <text x="470" y="424" font-size="13.5" font-weight="700" fill="#9dc0f5" text-anchor="middle">RS485</text>
+  <text x="470" y="444" font-size="11" fill="#7ba4de" text-anchor="middle">V2.05</text>
+
+  <!-- 模块：逻辑侧 5 脚（下边） -->
+  <g>
+    <circle cx="370" cy="550" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="395.4" cy="550" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="420.8" cy="550" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="446.2" cy="550" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="471.6" cy="550" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <g font-size="12.5" font-weight="700" fill="#cfe0f7">
+      <text x="374" y="542" transform="rotate(-90 374 542)">GND</text>
+      <text x="399.4" y="542" transform="rotate(-90 399.4 542)">TXD</text>
+      <text x="424.8" y="542" transform="rotate(-90 424.8 542)">RXD</text>
+      <text x="450.2" y="542" transform="rotate(-90 450.2 542)">VCC</text>
+      <text x="475.6" y="542" transform="rotate(-90 475.6 542)">EN</text>
+    </g>
+  </g>
+
+  <!-- 模块：总线侧 3 脚（上边） -->
+  <g>
+    <circle cx="395.4" cy="350" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="420.8" cy="350" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="446.2" cy="350" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <g font-size="12.5" font-weight="700" fill="#cfe0f7">
+      <text x="399.4" y="398" transform="rotate(-90 399.4 398)">B</text>
+      <text x="424.8" y="398" transform="rotate(-90 424.8 398)">A</text>
+      <text x="450.2" y="398" transform="rotate(-90 450.2 398)">GND</text>
+    </g>
+  </g>
+
+  <!-- ============ ESP32-C3 SuperMini ============ -->
+  <rect x="680" y="390" width="225" height="180" rx="4" fill="url(#espG)" stroke="#0c0e11" stroke-width="2" filter="url(#sh)"/>
+  <text x="792" y="270" font-size="15" font-weight="700" fill="#1a1f27" text-anchor="middle">ESP32-C3 SuperMini（HW-466AB）</text>
+  <text x="792" y="289" font-size="11.5" fill="#5b6470" text-anchor="middle">两排 × 8 脚 · 行距 15.24 mm（6 格）</text>
+
+  <!-- USB-C 口 -->
+  <rect x="890" y="467" width="24" height="26" rx="4" fill="#8b939d" stroke="#4a5058" stroke-width="1.5"/>
+  <path d="M 916 480 L 934 480" stroke="#374151" stroke-width="2"/>
+  <polygon points="936,480 926,475 926,485" fill="#374151"/>
+
+  <!-- 上排引脚（未用，灰点） -->
+  <g fill="#6b7280">
+    <circle cx="810.2" cy="404" r="4"/>
+    <circle cx="784.8" cy="404" r="4"/>
+    <circle cx="759.4" cy="404" r="4"/>
+    <circle cx="734" cy="404" r="4"/>
+    <circle cx="708.6" cy="404" r="4"/>
+  </g>
+  <!-- 下排引脚（未用，灰点） -->
+  <g fill="#6b7280">
+    <circle cx="886.4" cy="556.4" r="4"/>
+    <circle cx="861" cy="556.4" r="4"/>
+    <circle cx="835.6" cy="556.4" r="4"/>
+    <circle cx="810.2" cy="556.4" r="4"/>
+    <circle cx="784.8" cy="556.4" r="4"/>
+    <circle cx="759.4" cy="556.4" r="4"/>
+  </g>
+  <!-- 用到的 5 脚 -->
+  <g>
+    <circle cx="886.4" cy="404" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="861" cy="404" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="835.6" cy="404" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="734" cy="556.4" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+    <circle cx="708.6" cy="556.4" r="6.5" fill="#c9d2da" stroke="#7b8794" stroke-width="1.5"/>
+  </g>
+  <g font-size="12.5" font-weight="700" fill="#e8edf3">
+    <text x="890.4" y="452" transform="rotate(-90 890.4 452)">5V</text>
+    <text x="865" y="452" transform="rotate(-90 865 452)">G</text>
+    <text x="839.6" y="452" transform="rotate(-90 839.6 452)">3.3</text>
+    <text x="738" y="545" transform="rotate(-90 738 545)">20</text>
+    <text x="712.6" y="545" transform="rotate(-90 712.6 545)">21</text>
+  </g>
+  <text x="712" y="452" font-size="10.5" fill="#8d97a3">其余 11 脚本次不用</text>
+
+  <!-- ============ 飞线短引 + W 编号圆标 ============ -->
+  <!-- 模块逻辑侧（向下引出） -->
+  <g stroke-linecap="round">
+    <line x1="370" y1="550" x2="370" y2="580" stroke="#2b2f36" stroke-width="3.5"/>
+    <line x1="395.4" y1="550" x2="395.4" y2="580" stroke="#f0b400" stroke-width="3.5"/>
+    <line x1="420.8" y1="550" x2="420.8" y2="580" stroke="#1a9e4b" stroke-width="3.5"/>
+    <line x1="446.2" y1="550" x2="446.2" y2="580" stroke="#d92b2b" stroke-width="3.5"/>
+    <line x1="471.6" y1="550" x2="471.6" y2="580" stroke="#1f6fd0" stroke-width="3.5"/>
+  </g>
+  <g>
+    <circle cx="370" cy="592" r="11.5" fill="#2b2f36"/><text x="370" y="597" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W3</text>
+    <circle cx="395.4" cy="592" r="11.5" fill="#f0b400"/><text x="395.4" y="597" font-size="11" font-weight="700" fill="#3a2c00" text-anchor="middle">W5</text>
+    <circle cx="420.8" cy="592" r="11.5" fill="#1a9e4b"/><text x="420.8" y="597" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W4</text>
+    <circle cx="446.2" cy="592" r="11.5" fill="#d92b2b"/><text x="446.2" y="597" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W1</text>
+    <circle cx="471.6" cy="592" r="11.5" fill="#1f6fd0"/><text x="471.6" y="597" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W2</text>
+  </g>
+
+  <!-- 模块总线侧（向上引出） -->
+  <g stroke-linecap="round">
+    <line x1="395.4" y1="350" x2="395.4" y2="320" stroke="#e8730c" stroke-width="3.5"/>
+    <line x1="420.8" y1="350" x2="420.8" y2="320" stroke="#e8730c" stroke-width="3.5"/>
+    <line x1="446.2" y1="350" x2="446.2" y2="320" stroke="#2b2f36" stroke-width="3.5"/>
+  </g>
+  <g>
+    <circle cx="395.4" cy="308" r="11.5" fill="#e8730c"/><text x="395.4" y="313" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W7</text>
+    <circle cx="420.8" cy="308" r="11.5" fill="#e8730c"/><text x="420.8" y="313" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W6</text>
+    <circle cx="446.2" cy="308" r="11.5" fill="#2b2f36"/><text x="446.2" y="313" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W8</text>
+  </g>
+
+  <!-- 端子侧 W6/W7/W8（向右引出） -->
+  <g stroke-linecap="round">
+    <line x1="131" y1="430" x2="196" y2="430" stroke="#e8730c" stroke-width="3.5"/>
+    <line x1="131" y1="480.8" x2="196" y2="480.8" stroke="#e8730c" stroke-width="3.5"/>
+    <line x1="131" y1="531.2" x2="196" y2="531.2" stroke="#2b2f36" stroke-width="3.5"/>
+  </g>
+  <g>
+    <circle cx="210" cy="430" r="11.5" fill="#e8730c"/><text x="210" y="435" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W6</text>
+    <circle cx="210" cy="480.8" r="11.5" fill="#e8730c"/><text x="210" y="485" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W7</text>
+    <circle cx="210" cy="531.2" r="11.5" fill="#2b2f36"/><text x="210" y="536" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W8</text>
+  </g>
+
+  <!-- ESP32 上排（向上引出） -->
+  <g stroke-linecap="round">
+    <line x1="886.4" y1="404" x2="886.4" y2="376" stroke="#d92b2b" stroke-width="3.5"/>
+    <line x1="861" y1="404" x2="861" y2="376" stroke="#2b2f36" stroke-width="3.5"/>
+    <line x1="835.6" y1="404" x2="835.6" y2="376" stroke="#1f6fd0" stroke-width="3.5"/>
+  </g>
+  <g>
+    <circle cx="886.4" cy="364" r="11.5" fill="#d92b2b"/><text x="886.4" y="369" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W1</text>
+    <circle cx="861" cy="364" r="11.5" fill="#2b2f36"/><text x="861" y="369" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W3</text>
+    <circle cx="835.6" cy="364" r="11.5" fill="#1f6fd0"/><text x="835.6" y="369" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W2</text>
+  </g>
+
+  <!-- ESP32 下排（向下引出） -->
+  <g stroke-linecap="round">
+    <line x1="708.6" y1="556.4" x2="708.6" y2="592" stroke="#1a9e4b" stroke-width="3.5"/>
+    <line x1="734" y1="556.4" x2="734" y2="592" stroke="#f0b400" stroke-width="3.5"/>
+  </g>
+  <g>
+    <circle cx="708.6" cy="604" r="11.5" fill="#1a9e4b"/><text x="708.6" y="609" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">W4</text>
+    <circle cx="734" cy="604" r="11.5" fill="#f0b400"/><text x="734" y="609" font-size="11" font-weight="700" fill="#3a2c00" text-anchor="middle">W5</text>
+  </g>
+
+  <!-- 两模块间距标注 -->
+  <g stroke="#374151" stroke-width="1.6">
+    <line x1="580" y1="650" x2="680" y2="650"/>
+    <line x1="580" y1="640" x2="580" y2="660"/>
+    <line x1="680" y1="640" x2="680" y2="660"/>
+  </g>
+  <text class="lbl" x="630" y="636" font-size="12" fill="#374151" text-anchor="middle">10 mm（4 格）</text>
+  <text class="lbl" x="630" y="676" font-size="11" fill="#6b7280" text-anchor="middle">飞线走廊 ≥7.6 mm</text>
+
+  <!-- 板内说明 -->
+  <text class="lbl" x="470" y="716" font-size="12" fill="#3f5646" text-anchor="middle">逻辑侧丝印：GND · TXD · RXD · VCC · EN（从左到右）</text>
+  <text class="lbl" x="470" y="737" font-size="12" fill="#3f5646" text-anchor="middle">总线侧丝印：B · A · GND（GND 在最后，别按位置数）</text>
+  <text class="lbl" x="792" y="716" font-size="12" fill="#3f5646" text-anchor="middle">USB-C 口朝板外（右侧），留 ≥5 mm 插线空间</text>
+  <text class="lbl" x="792" y="737" font-size="12" fill="#3f5646" text-anchor="middle">两排引脚按板面丝印核对，勿凭位置猜</text>
+
+  <!-- 板尺寸标注 -->
+  <g stroke="#6b7280" stroke-width="1.4">
+    <line x1="60" y1="852" x2="960" y2="852"/>
+    <line x1="60" y1="845" x2="60" y2="859"/>
+    <line x1="960" y1="845" x2="960" y2="859"/>
+  </g>
+  <text class="lbl" x="510" y="847" font-size="12" fill="#4b5563" text-anchor="middle">90 mm</text>
+
+  <g stroke="#6b7280" stroke-width="1.4">
+    <line x1="42" y1="130" x2="42" y2="830"/>
+    <line x1="35" y1="130" x2="49" y2="130"/>
+    <line x1="35" y1="830" x2="49" y2="830"/>
+  </g>
+  <text x="34" y="480" font-size="12" fill="#4b5563" text-anchor="middle" transform="rotate(-90 34 480)">70 mm</text>
+
+  <text x="60" y="876" font-size="12" fill="#6b7280">▲ 元件面俯视（正视图）。同编号 = 同一根线；实际走线按纸上 1:1 镜像图定。焊接面为镜像，需另画图 3。</text>
+
+  <!-- ============ 右侧：接线表 ============ -->
+  <rect x="990" y="130" width="390" height="470" rx="8" fill="#ffffff" stroke="#dde3ec" stroke-width="1.5" filter="url(#sh)"/>
+  <text x="1014" y="164" font-size="16" font-weight="700" fill="#111827">8 根线 · 按角色接，不按同名接</text>
+  <line x1="1014" y1="176" x2="1366" y2="176" stroke="#e6ebf2" stroke-width="1.5"/>
+
+  <g font-size="12">
+    <text x="1014" y="200" font-size="11" fill="#8a94a3">#</text>
+    <text x="1036" y="200" font-size="11" fill="#8a94a3">ESP32</text>
+    <text x="1106" y="200" font-size="11" fill="#8a94a3">模块 / 端子</text>
+    <text x="1300" y="200" font-size="11" fill="#8a94a3">色</text>
+
+    <circle cx="1018" cy="228" r="9" fill="#d92b2b"/><text x="1018" y="232" font-size="9.5" font-weight="700" fill="#fff" text-anchor="middle">1</text>
+    <text x="1036" y="233" font-weight="700" fill="#111827">5V</text>
+    <text x="1082" y="233" fill="#9aa3b0">→</text>
+    <text x="1106" y="233" font-weight="700" fill="#111827">VCC</text>
+    <text x="1152" y="233" font-size="11" fill="#6b7280">模块必须 5V</text>
+    <rect x="1300" y="221" width="14" height="14" rx="3" fill="#d92b2b"/>
+
+    <circle cx="1018" cy="266" r="9" fill="#1f6fd0"/><text x="1018" y="270" font-size="9.5" font-weight="700" fill="#fff" text-anchor="middle">2</text>
+    <text x="1036" y="271" font-weight="700" fill="#111827">3.3</text>
+    <text x="1082" y="271" fill="#9aa3b0">→</text>
+    <text x="1106" y="271" font-weight="700" fill="#111827">EN</text>
+    <text x="1152" y="271" font-size="11" fill="#6b7280">固定高电平，不是 5V</text>
+    <rect x="1300" y="259" width="14" height="14" rx="3" fill="#1f6fd0"/>
+
+    <circle cx="1018" cy="304" r="9" fill="#2b2f36"/><text x="1018" y="308" font-size="9.5" font-weight="700" fill="#fff" text-anchor="middle">3</text>
+    <text x="1036" y="309" font-weight="700" fill="#111827">G</text>
+    <text x="1082" y="309" fill="#9aa3b0">→</text>
+    <text x="1106" y="309" font-weight="700" fill="#111827">GND</text>
+    <text x="1152" y="309" font-size="11" fill="#6b7280">先焊这根（共地基准）</text>
+    <rect x="1300" y="297" width="14" height="14" rx="3" fill="#2b2f36"/>
+
+    <circle cx="1018" cy="342" r="9" fill="#1a9e4b"/><text x="1018" y="346" font-size="9.5" font-weight="700" fill="#fff" text-anchor="middle">4</text>
+    <text x="1036" y="347" font-weight="700" fill="#111827">21<tspan font-size="10" fill="#8a94a3" font-weight="400"> TX</tspan></text>
+    <text x="1082" y="347" fill="#9aa3b0">→</text>
+    <text x="1106" y="347" font-weight="700" fill="#111827">RXD</text>
+    <text x="1152" y="347" font-size="11" fill="#c62828" font-weight="700">ESP32 发 → 模块收</text>
+    <rect x="1300" y="335" width="14" height="14" rx="3" fill="#1a9e4b"/>
+
+    <circle cx="1018" cy="380" r="9" fill="#f0b400"/><text x="1018" y="384" font-size="9.5" font-weight="700" fill="#3a2c00" text-anchor="middle">5</text>
+    <text x="1036" y="385" font-weight="700" fill="#111827">20<tspan font-size="10" fill="#8a94a3" font-weight="400"> RX</tspan></text>
+    <text x="1082" y="385" fill="#9aa3b0">→</text>
+    <text x="1106" y="385" font-weight="700" fill="#111827">TXD</text>
+    <text x="1152" y="385" font-size="11" fill="#c62828" font-weight="700">模块发 → ESP32 收</text>
+    <rect x="1300" y="373" width="14" height="14" rx="3" fill="#f0b400"/>
+
+    <circle cx="1018" cy="418" r="9" fill="#e8730c"/><text x="1018" y="422" font-size="9.5" font-weight="700" fill="#fff" text-anchor="middle">6</text>
+    <text x="1036" y="423" font-weight="700" fill="#111827">A</text>
+    <text x="1082" y="423" fill="#9aa3b0">→</text>
+    <text x="1106" y="423" font-weight="700" fill="#111827">端子 1</text>
+    <text x="1152" y="423" font-size="11" fill="#6b7280">字母对字母</text>
+    <rect x="1300" y="411" width="14" height="14" rx="3" fill="#e8730c"/>
+
+    <circle cx="1018" cy="456" r="9" fill="#e8730c"/><text x="1018" y="460" font-size="9.5" font-weight="700" fill="#fff" text-anchor="middle">7</text>
+    <text x="1036" y="461" font-weight="700" fill="#111827">B</text>
+    <text x="1082" y="461" fill="#9aa3b0">→</text>
+    <text x="1106" y="461" font-weight="700" fill="#111827">端子 2</text>
+    <text x="1152" y="461" font-size="11" fill="#6b7280">别按位置数</text>
+    <rect x="1300" y="449" width="14" height="14" rx="3" fill="#e8730c"/>
+
+    <circle cx="1018" cy="494" r="9" fill="#2b2f36"/><text x="1018" y="498" font-size="9.5" font-weight="700" fill="#fff" text-anchor="middle">8</text>
+    <text x="1036" y="499" font-weight="700" fill="#111827">GND</text>
+    <text x="1082" y="499" fill="#9aa3b0">→</text>
+    <text x="1106" y="499" font-weight="700" fill="#111827">端子 3</text>
+    <text x="1152" y="499" font-size="11" fill="#6b7280">真机侧 GND</text>
+    <rect x="1300" y="487" width="14" height="14" rx="3" fill="#2b2f36"/>
+
+    <line x1="1014" y1="518" x2="1366" y2="518" stroke="#e6ebf2" stroke-width="1.5"/>
+    <text x="1014" y="544" font-size="11.5" fill="#6b7280">就这 8 根。没有第 9 根，也没有「2 根短接」。</text>
+    <text x="1014" y="566" font-size="11.5" fill="#6b7280">LED 走板载 GPIO8，MAX13487 无 DE 脚。</text>
+    <text x="1014" y="588" font-size="11.5" fill="#6b7280">5V / 3.3 各只用一次，互不短接。</text>
+  </g>
+
+  <!-- ============ 右侧：交叉说明 ============ -->
+  <rect x="990" y="620" width="390" height="210" rx="8" fill="#fff5f5" stroke="#e8b4b4" stroke-width="1.5"/>
+  <text x="1014" y="652" font-size="15" font-weight="700" fill="#b32020">为什么 W4 / W5 是交叉的</text>
+  <text x="1014" y="680" font-size="12" fill="#5c2b2b">模块丝印写的是「模块自己的收发方向」，</text>
+  <text x="1014" y="701" font-size="12" fill="#5c2b2b">不是芯片脚名：</text>
+  <text x="1014" y="730" font-size="12" fill="#7a2222" font-weight="700">模块 RXD = 芯片 DI（驱动输入）</text>
+  <text x="1036" y="751" font-size="12" fill="#5c2b2b">⇒ 必须接 ESP32 的 TX（GPIO21）</text>
+  <text x="1014" y="777" font-size="12" fill="#7a2222" font-weight="700">模块 TXD = 芯片 RO（接收输出）</text>
+  <text x="1036" y="798" font-size="12" fill="#5c2b2b">⇒ 必须接 ESP32 的 RX（GPIO20）</text>
+  <text x="1014" y="812" font-size="11.5" fill="#b32020">同名对接 ⇒ 双向全断，而电源灯照常亮（M4 卡 5 天）</text>
+
+  <!-- ============ 底部三卡 ============ -->
+  <rect x="60" y="900" width="440" height="160" rx="8" fill="#ffffff" stroke="#dde3ec" stroke-width="1.5"/>
+  <text x="84" y="930" font-size="15" font-weight="700" fill="#111827">关键尺寸（错一个就装不上）</text>
+  <g font-size="12" fill="#4b5563">
+    <text x="84" y="958">· 板 70 × 90 mm，孔距 2.54 mm</text>
+    <text x="84" y="980">· SuperMini 两排各 8 孔，行距 15.24 mm</text>
+    <text x="84" y="1002">· 模块 5 脚 2.54 间距，3 脚排居中偏 1 格</text>
+    <text x="84" y="1024">· 端子 3P 5.08 mm，正好跨 2 个孔</text>
+    <text x="84" y="1046">· 4 × ⌀3.2 安装孔：距边 ≥5、距焊盘 ≥4</text>
+  </g>
+
+  <rect x="520" y="900" width="400" height="160" rx="8" fill="#fff8f0" stroke="#f0c48a" stroke-width="1.5"/>
+  <text x="544" y="930" font-size="15" font-weight="700" fill="#9a5b00">禁止加装（模块板载已有）</text>
+  <g font-size="12" fill="#6b4a12">
+    <text x="544" y="958">✕ 排母 —— 引脚直接穿板焊</text>
+    <text x="544" y="980">✕ 120 Ω 终端 / 4.7 kΩ 偏置</text>
+    <text x="544" y="1002">✕ 1k+2k 分压 / 电平转换</text>
+    <text x="544" y="1024">✕ EN 接 5V、VCC 接 3.3V（两处都错）</text>
+    <text x="544" y="1046">✕ 跳过 M1–M17 电检就上电</text>
+  </g>
+
+  <rect x="940" y="900" width="440" height="160" rx="8" fill="#ffffff" stroke="#dde3ec" stroke-width="1.5"/>
+  <text x="964" y="930" font-size="15" font-weight="700" fill="#111827">焊接顺序</text>
+  <g font-size="12" fill="#4b5563">
+    <text x="964" y="956">① 拍照 + 钻 4 个安装孔</text>
+    <text x="964" y="978">② 干插定位（不焊）</text>
+    <text x="964" y="1000">③ 焊 ESP32 对角 → 复查几何</text>
+    <text x="964" y="1022">④ 焊模块对角 → 补全 5+3 脚</text>
+    <text x="964" y="1044">⑤ 焊端子（热容量大，先焊）</text>
+    <text x="1200" y="956">⑥ W3 GND（先建地）</text>
+    <text x="1200" y="978">⑦ W1 5V / W2 3.3→EN</text>
+    <text x="1200" y="1000">⑧ W4 / W5 双绞远离电源</text>
+    <text x="1200" y="1022">⑨ W6 / W7 / W8 到端子</text>
+    <text x="1200" y="1044">⑩ 电检 M1–M17 → 才上电</text>
+  </g>
+</svg>
