@@ -106,16 +106,29 @@ FROM rx JOIN tx ON rx.night_id = tx.night_id
 ORDER BY tx.night_id
 """
 
-# ③ 全天（C-b 值）
-SQL_ALL = """
-WITH hb AS (
-    SELECT udp_tx, recv_mono,
-           ROW_NUMBER() OVER (ORDER BY recv_mono ASC)  AS rn_a,
-           ROW_NUMBER() OVER (ORDER BY recv_mono DESC) AS rn_z
+# ③ 全天分母：必须**按世代分段求和**。
+#    ⚠️ 2026-11-04 修 bug（旧电脑在 168h 库上实跑发现）：原实现用「末条 udp_tx − 首条 udp_tx + 1」
+#    跨全库算，而固件重启会把 g_udpTx 归零 ⇒ 一次重启就吃掉前面全部增量。
+#    168h 里 10-29 有 3 次重启，导致 C-b 被算成 131.66%（物理不可能：收到比发出还多）。
+#    正解：按 epoch_id 分段，每段 max−min+1 再求和（段内单调，故 max=末、min=首）。
+SQL_TX_EPOCH = """
+SELECT COALESCE(epoch_id,-1) AS ep,
+       MIN(udp_tx) AS tx_a,
+       MAX(udp_tx) AS tx_z,
+       COUNT(*)    AS n_hb
+FROM udp_packet
+WHERE ptype='hb' AND udp_tx IS NOT NULL
+GROUP BY COALESCE(epoch_id,-1)
+"""
+
+# 段内单调性校验：若同一 epoch 内 udp_tx 出现回落，说明 epoch 切分漏了重启 ⇒ 该段不可算
+SQL_TX_NONMONO = """
+WITH s AS (
+    SELECT COALESCE(epoch_id,-1) AS ep, udp_tx,
+           LAG(udp_tx) OVER (PARTITION BY COALESCE(epoch_id,-1) ORDER BY recv_mono) AS prev
     FROM udp_packet WHERE ptype='hb' AND udp_tx IS NOT NULL
 )
-SELECT COUNT(DISTINCT device_id || '|' || COALESCE(epoch_id,-1) || '|' || seq) AS rx_rows
-FROM udp_packet WHERE ptype IN ('data','hb','err') AND seq IS NOT NULL
+SELECT ep, COUNT(*) AS drops FROM s WHERE prev IS NOT NULL AND udp_tx < prev GROUP BY ep
 """
 
 
@@ -133,12 +146,22 @@ def main(db_path):
     hours = []
     for r in conn.execute(SQL_HOUR):
         tx_rows = r["tx_rows"]
-        ok = (not r["rebooted"]) and tx_rows and tx_rows > 0
+        # rx > tx 物理不可能（收到比发出多）⇒ 该小时内有 udp_tx 回卷没被 rebooted 抓到
+        ok = ((not r["rebooted"]) and tx_rows and tx_rows > 0
+              and r["rx_rows"] <= tx_rows)
+        if r["rebooted"]:
+            note = "REBOOT_IN_HOUR"
+        elif not (tx_rows and tx_rows > 0):
+            note = "NO_TX"
+        elif r["rx_rows"] > tx_rows:
+            note = "RX_GT_TX"
+        else:
+            note = ""
         hours.append({
             "hr": r["hr"], "rx_rows": r["rx_rows"], "tx_rows": tx_rows,
             "m3_pct": round(pct(r["rx_rows"], tx_rows), 4) if ok else None,
             "epochs_in_hour": r["epochs_in_hour"],
-            "note": "" if ok else ("REBOOT_IN_HOUR" if r["rebooted"] else "NO_TX"),
+            "note": note,
         })
     p1 = os.path.join(out_dir, "m3_by_hour.csv")
     with open(p1, "w", newline="", encoding="utf-8-sig") as f:
@@ -148,17 +171,43 @@ def main(db_path):
         w.writerows(hours)
 
     # ---- 逐夜
+    # ⚠️ 2026-11-04 修口径（旧电脑实跑发现）：原来只判「10 个时钟小时都有心跳」，
+    #    但 168h 的起跑夜 22:44 才开跑 ⇒ 22 点只有 16 分钟，仍被当成完整夜。
+    #    实测该夜 tx=66,684 行 = 33,342 秒 = 9.26 h，比 10 h 缺 44 分钟。
+    #    「完整 10 小时」是本判据的**预声明定义**，必须真的覆盖满 ⇒ 补首末包时刻校验。
+    def _hms(s):
+        return s[11:19] if len(s) >= 19 else ""
+
+    hearts = {}
+    for r in conn.execute(SQL_TX_NONMONO):
+        hearts[r["ep"]] = r["drops"]
+
     nights = []
     for r in conn.execute(SQL_NIGHT):
         tx_rows = r["tx_rows"]
-        ok = (not r["rebooted"]) and tx_rows and tx_rows > 0
+        first_ok = "22:00:00" <= _hms(r["t_first"]) <= "22:05:00"
+        last_ok = "07:55:00" <= _hms(r["t_last"]) <= "08:00:00"
+        ok = (not r["rebooted"]) and tx_rows and tx_rows > 0 and r["rx_rows"] <= tx_rows
+        if r["rebooted"]:
+            note = "REBOOT_IN_NIGHT"
+        elif not first_ok:
+            note = "PARTIAL_START(%s)" % _hms(r["t_first"])
+        elif not last_ok:
+            note = "PARTIAL_END(%s)" % _hms(r["t_last"])
+        elif not (tx_rows and tx_rows > 0):
+            note = "NO_TX"
+        elif r["rx_rows"] > tx_rows:
+            note = "RX_GT_TX"
+        else:
+            note = ""
         nights.append({
             "night_id": r["night_id"], "t_first": r["t_first"], "t_last": r["t_last"],
             "hours_seen": r["hours_seen"], "rx_rows": r["rx_rows"], "tx_rows": tx_rows,
             "m3_pct": round(pct(r["rx_rows"], tx_rows), 4) if ok else None,
-            # 完整夜 = 10 个时钟小时都有 hb
-            "complete": 1 if (r["hours_seen"] == 10 and not r["rebooted"]) else 0,
-            "note": "" if ok else ("REBOOT_IN_NIGHT" if r["rebooted"] else "NO_TX"),
+            # 完整夜 = 10 个时钟小时都有 hb **且** 首包 ≤22:05 **且** 末包 ≥07:55 且无重启
+            "complete": 1 if (r["hours_seen"] == 10 and first_ok and last_ok
+                              and not r["rebooted"]) else 0,
+            "note": note,
         })
     p2 = os.path.join(out_dir, "m3_by_night.csv")
     with open(p2, "w", newline="", encoding="utf-8-sig") as f:
@@ -170,11 +219,20 @@ def main(db_path):
     # ---- 汇总：只算「完整且无重启」的夜（不许挑，全部计入）
     good_n = [n for n in nights if n["complete"] == 1]
     good_h = [h for h in hours if h["m3_pct"] is not None]
-    all_rx = conn.execute(SQL_ALL).fetchone()["rx_rows"]
-    hb_all = list(conn.execute(
-        "SELECT udp_tx, recv_mono FROM udp_packet WHERE ptype='hb' "
-        "AND udp_tx IS NOT NULL ORDER BY recv_mono"))
-    all_tx = (hb_all[-1]["udp_tx"] - hb_all[0]["udp_tx"] + 1) if hb_all else 0
+    all_rx = conn.execute(
+        "SELECT COUNT(DISTINCT device_id || '|' || COALESCE(epoch_id,-1) || '|' || seq) "
+        "FROM udp_packet WHERE ptype IN ('data','hb','err') AND seq IS NOT NULL"
+    ).fetchone()[0]
+
+    # 全天分母：按世代分段求和（见 SQL_TX_EPOCH 的注释）
+    all_tx = 0
+    seg_bad = []
+    seg_n = 0
+    for s in conn.execute(SQL_TX_EPOCH):
+        seg_n += 1
+        if hearts.get(s["ep"], 0) > 0:
+            seg_bad.append(s["ep"])      # 段内有回卷 ⇒ epoch 切分漏了重启，该段不可信
+        all_tx += (s["tx_z"] - s["tx_a"] + 1)
 
     lines = []
     A = lines.append
@@ -194,18 +252,32 @@ def main(db_path):
     A("")
     A("  完整夜 %d 个 / 共 %d 个夜段" % (len(good_n), len(nights)))
     if len(good_n) != len(nights):
-        bad = [n["night_id"] for n in nights if n["complete"] != 1]
-        A("  ⚠️ 非完整夜（首尾残段或含重启）已剔除，不参与 C-a：%s" % ", ".join(bad))
+        bad = ["%s[%s]" % (n["night_id"], n["note"] or "?")
+               for n in nights if n["complete"] != 1]
+        A("  ⚠️ 非完整夜已剔除，不参与 C-a：%s" % ", ".join(bad))
+        A("     （判据要求真的覆盖满 22:00–08:00；起跑/收尾残段不算）")
     A("")
     if good_n:
         sr = sum(n["rx_rows"] for n in good_n)
         st = sum(n["tx_rows"] for n in good_n)
         A("【2】★ C-a 判据值：完整夜合计 %d 行 / %d 行 = **%.4f%%**" % (sr, st, pct(sr, st)))
         A("    阈值 ≥99%% ⇒ %s" % ("**成立**" if pct(sr, st) >= 99.0 else "**不成立（裁定作废，M3 回落 F）**"))
+        # 稳健性对照：把被剔除但 tx 仍然有效的夜也算进去，看结论会不会翻转
+        loose = [n for n in nights if n["m3_pct"] is not None]
+        if len(loose) != len(good_n):
+            lr = sum(n["rx_rows"] for n in loose)
+            lt = sum(n["tx_rows"] for n in loose)
+            A("    稳健性对照（把上面剔除的夜也算进来，共 %d 夜）= %.4f%% ⇒ 结论%s"
+              % (len(loose), pct(lr, lt),
+                 "一致" if (pct(lr, lt) >= 99.0) == (pct(sr, st) >= 99.0) else "**不一致，须人工裁定**"))
     else:
         A("【2】没有完整夜 ⇒ C-a 无法判定")
     A("")
-    A("【3】C-b 归档值：全天 %d 行 / %d 行 = **%.4f%%**" % (all_rx, all_tx, pct(all_rx, all_tx)))
+    A("【3】C-b 归档值：全天 %d 行 / %d 行 = **%.4f%%**（分母按 %d 个世代分段求和）"
+      % (all_rx, all_tx, pct(all_rx, all_tx), seg_n))
+    if seg_bad:
+        A("    ⚠️ 世代 %s 段内 udp_tx 仍有回落 ⇒ epoch 切分可能漏了重启，C-b 会偏大"
+          % ", ".join(str(x) for x in seg_bad))
     A("")
     A("【4】逐小时有效 %d 个（有 udp_tx 增量且无重启）" % len(good_h))
     A("    ⚠️ 逐小时值有窗口边缘效应：分母取该小时「首条/末条**收到的** hb」的 udp_tx，")
