@@ -227,7 +227,18 @@ CREATE TABLE IF NOT EXISTS udp_packet (
     udp_tx        INTEGER,
     rssi          INTEGER,
     free_heap     INTEGER,
-    ts_ok         INTEGER
+    ts_ok         INTEGER,
+    -- 2026-11-04 增列（旧电脑回传：hb 抽干列缺口）------------------------------
+    -- `clk_hold`/`clk_back`/`boot`/`reset_reason` 是 02_docs/24 Y-4（时钟回退钳位）
+    -- 与 P0-3（复位原因/启动世代）的**唯一可观测证据**。以前只把 hb 的
+    -- poll_ok/poll_err/udp_tx/rssi/free_heap 抽成列、其余塞进 payload，
+    -- 而 hb 的 payload 又**刻意不存**（见 _process 里的注释）⇒ 这四个字段
+    -- 在库里彻底不可查，168h 收官时 Y-4 只能记"未验证"。
+    -- 现在落成独立列：hb 仍不存 payload（体积不变），但证据位补齐。
+    clk_hold      INTEGER,
+    clk_back      INTEGER,
+    boot          INTEGER,
+    reset_reason  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_pkt_dev_seq ON udp_packet(device_id, seq);
 CREATE INDEX IF NOT EXISTS idx_pkt_recv    ON udp_packet(recv_mono);
@@ -395,6 +406,12 @@ def init_schema(conn: sqlite3.Connection, fields) -> None:
                  "ON meter_record(epoch_id, seq)")
 
     # 2026-10-21 新增列（旧库平滑升级）
+    _ensure_columns(conn, "udp_packet", [
+        # Y-4 / P0-3 证据列：老库（168h 那份）建表时没有这四列，
+        # CREATE TABLE IF NOT EXISTS 不会补 ⇒ 必须走幂等 ALTER，否则老库续跑即崩。
+        ("clk_hold", "INTEGER"), ("clk_back", "INTEGER"),
+        ("boot", "INTEGER"), ("reset_reason", "TEXT"),
+    ])
     _ensure_columns(conn, "collect_run", [
         ("stop_signal_at", "TEXT"), ("fw_ver", "TEXT"), ("code_commit", "TEXT"),
         ("pc_host", "TEXT"), ("pc_ip", "TEXT"), ("os_info", "TEXT"),
@@ -416,6 +433,27 @@ def init_schema(conn: sqlite3.Connection, fields) -> None:
 def log_event(conn: sqlite3.Connection, ts: str, kind: str, severity: str, detail: str) -> None:
     conn.execute("INSERT INTO event_log (ts,kind,severity,detail) VALUES (?,?,?,?)",
                  (ts, kind, severity, detail))
+
+
+# ------------------------------------------------- Y-4 / P0-3 证据字段提取
+# 只在 hb 行上取值：数据行不带这些字段，取到 None 正好落 NULL。
+# ⚠️ 不能用 `obj.get(k) or None`：`clk_back` 的合法值可以是 0 或负数，
+#    `or` 会把 0 吞成 NULL ⇒ "钳位发生过但回退秒数恰好为 0" 变成 "没发生过"。
+# ⚠️ 也不能用 isinstance(x, int) 卡 bool：JSON true/false 在 Python 里是 int 子类。
+def _hb_int(obj: dict, key: str, ptype: str):
+    if ptype != "hb":
+        return None
+    v = obj.get(key)
+    if isinstance(v, bool) or not isinstance(v, int):
+        return None
+    return v
+
+
+def _hb_str(obj: dict, key: str, ptype: str):
+    if ptype != "hb":
+        return None
+    v = obj.get(key)
+    return v if isinstance(v, str) else None
 
 
 def cursor_get(conn, k, default=None):
@@ -1107,14 +1145,20 @@ class Writer(threading.Thread):
         self.conn.execute(
             "INSERT INTO udp_packet (recv_time,recv_mono,src_ip,src_port,dev,device_id,seq,"
             "ptype,payload_len,payload,enc,parse_status,epoch_id,poll_ok,poll_err,udp_tx,"
-            "rssi,free_heap,ts_ok) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "rssi,free_heap,ts_ok,clk_hold,clk_back,boot,reset_reason) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (recv["recv_time"], recv["recv_mono"], recv["src_ip"], recv["src_port"],
              dev, device_id, seq, ptype, recv["payload_len"],
              # hb 不存 payload：每轮必发、字段已抽干，存了等于白占一半体积
              None if ptype == "hb" else recv["payload"],
              recv["enc"], recv["parse_status"], epoch_id,
              obj.get("poll_ok"), obj.get("poll_err"), obj.get("udp_tx"),
-             obj.get("rssi"), obj.get("free_heap"), 1 if obj.get("ts_ok") else 0))
+             obj.get("rssi"), obj.get("free_heap"), 1 if obj.get("ts_ok") else 0,
+             # Y-4 / P0-3 证据（仅 hb 携带；数据行一律 NULL）。
+             # 用 isinstance 严判而非 or 兜底：`clk_back` 可以是负数或 0，
+             # `obj.get(k) or None` 会把合法的 0 吞成 NULL，语义就反了。
+             _hb_int(obj, "clk_hold", ptype), _hb_int(obj, "clk_back", ptype),
+             _hb_int(obj, "boot", ptype), _hb_str(obj, "reset", ptype)))
         self.pending_rows += 1
         self.st.bump(db_rows=1)
         self.last_progress = time.monotonic()
@@ -2808,16 +2852,21 @@ def main(argv=None) -> int:
     run_id, started = ensure_run(conn, args.hours)
 
     # 运行元数据：每次启动都刷新，但**不覆盖** started_at（§2.6 续跑语义）
+    # ⚠️ 2026-11-04 修正（旧电脑回传）：`starts+1` 原先就写在这条**无条件执行**的
+    #    UPDATE 里，而 `--repair` / `--verify-raw` 的早退分支排在它**之后** ⇒
+    #    诊断操作也被记成一次"进程启动"。实测代价：2026-11-04 两次 `--verify-raw`
+    #    把一份只有 1 次真实启动的库刷成 starts=3，`starts>1 ⇒ 中途重启过`
+    #    这条判据当场失效（还会被当成"采集中断过"写进收官报告）。
+    #    现改为：本语句只刷指纹，`starts` 由下方 collect 路径单独自增。
     hi = host_info()
     conn.execute(
-        "UPDATE collect_run SET starts=COALESCE(starts,0)+1, pc_host=?, pc_ip=?, os_info=?,"
+        "UPDATE collect_run SET pc_host=?, pc_ip=?, os_info=?,"
         " py_ver=?, sqlite_ver=?, code_commit=?, fw_ver=COALESCE(?,fw_ver),"
         " bin_sha256=COALESCE(?,bin_sha256) WHERE run_id=?",
         (hi["pc_host"], hi["pc_ip"], hi["os_info"], hi["py_ver"], hi["sqlite_ver"],
          git_commit(), args.fw_ver, sha256_file(args.bin_path) if args.bin_path else None,
          run_id))
     conn.commit()
-    run_meta = conn.execute("SELECT * FROM collect_run WHERE run_id=?", (run_id,)).fetchone()
 
     if args.repair:
         n = repair(conn, fields, lg)
@@ -2831,6 +2880,12 @@ def main(argv=None) -> int:
         conn.close()
         print("raw 自校验：%d 行，不一致 %d 处 → %s" % (checked, bad, out))
         return 0
+
+    # ---- 到这里才算「真的启动了一次采集」（诊断模式已在上面各自 return）----
+    conn.execute("UPDATE collect_run SET starts=COALESCE(starts,0)+1 WHERE run_id=?",
+                 (run_id,))
+    conn.commit()
+    run_meta = conn.execute("SELECT * FROM collect_run WHERE run_id=?", (run_id,)).fetchone()
 
     lg.info("=" * 74)
     lg.info("udp_collect 启动")

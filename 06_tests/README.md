@@ -113,6 +113,7 @@ C:\Users\17352\.workbuddy\binaries\python\envs\default\Scripts\python.exe
 
 | 版本 | 日期 | 作者 | 变更内容 |
 | --- | --- | --- | --- |
+| v1.13 | 2026-11-04 | 砚青 | **`udp_collect.py` 修 2 处**（168h 收官核验时旧电脑挖出）：①`collect_run.starts` 原与指纹刷新写在同一**无条件** UPDATE 里，而 `--repair`/`--verify-raw` 的早退在它**之后** ⇒ 两次 `--verify-raw` 把 1 次真实启动刷成 3，`starts>1 ⇒ 中途重启过` 判据（`02_docs/24` P-2、`02_docs/32` F-10 依赖）当场失效，现改为只在 collect 路径自增；②`udp_packet` 增 `clk_hold`/`clk_back`/`boot`/`reset_reason` 四列（幂等 ALTER，老库不重建），因为 hb **有意不存 payload** 而抽干列里没这四个 ⇒ Y-4 时钟钳位证据在 168h 库中彻底不可得。取值用 `_hb_int`/`_hb_str` 严判，避免 `clk_back=0` 被 `or None` 吞成 NULL。自测：`--selftest` 全绿 + 端到端四例（非零/零值/旧固件缺字段/data 行）+ `--verify-raw` 后 starts 仍为 1 + 旧 schema 库升 24 列零丢行。 |
 | v1.12 | 2026-10-21 | 砚青 | **`udp_collect.py` 修 3 个会静默失效的 bug 并移植 Ubuntu**：统计线程误用只读连接（快照/告警写不进去且被吞）、续跑 naive/aware 不一致致 T3 `TypeError`、无 SIGTERM 收尾。新增 `--env-check` / `--verify-raw` / `--report-out` / `--bin`，`SO_RCVBUF` 回读、内核与网卡丢包采样、每日备份、报告固定 LF。触发：168h 要在 Ubuntu 旧机上跑。 |
 | v1.11 | 2026-10-17 | 砚青 | 新增 **`udp_collect.py`**（168h 连续采集接收端，承接 `02_docs/22` §2 的设计）。落地时发现并修正方案里三处与固件实际行为不符的口径：① `2·ΔR` 只在该 `QI_SEND_ERR_ROW=1` 时成立，须实测推断；② hb 的 `udp_tx` 是**发送前**的值，窗口内发出行数 = `Δudp_tx+1`；③ 世代首轮无差分可依，须看 `seq_first+1` 的 ptype 归属，否则 M1 系统性少 1。另实测到一个**既有 schema 限制**：`meter_record` 主键为秒级 `collect_time`，1 Hz 下同秒两轮会顶掉一行（原始包未丢，主键加宽后可 `--repair` 重放）。 |
 | v1.10 | 2026-10-17 | 砚青 | **结构整理**：`usb485_loopback.py` 与 `M4_重测操作卡.md` 移入 `_archive/`（含归档说明 README）；§1 补目录约定与 M7 计划项 `udp_collect.py`。触发：用户要求整理项目结构。 |
